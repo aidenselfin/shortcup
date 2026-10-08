@@ -1,0 +1,4 @@
+# Exact repo-relative paths of png/jpg/jpeg/gif/heic/pdf (and other media
+# types the scanner flags). No wildcards. One path per line.
+# New binary files fail the privacy scan until a path is listed here and
+# reviewed: they cannot be text-scanned for screen contents or personal data.

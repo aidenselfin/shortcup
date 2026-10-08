@@ -6,3 +6,6 @@ C:\Users\someone\fake-windows fake self-test fixture
 C:\\Users\\someone\\fake-windows-escaped fake self-test fixture
 /home/someone/fake-linux fake self-test fixture
 /Users/가짜사용자/fake-korean fake self-test fixture
+/Users/./someone/x fake self-test fixture
+/Users/Shared/../someone/x fake self-test fixture
+/home/./someone/x fake self-test fixture

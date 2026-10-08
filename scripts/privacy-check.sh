@@ -105,7 +105,7 @@ resolve_commit() {
   printf '%s\n' "$sha"
 }
 
-default_branch_base() {
+default_branch_commit() {
   local ref branch=${DEFAULT_BRANCH:-main}
   for ref in \
     "refs/remotes/origin/${branch}" \
@@ -115,10 +115,27 @@ default_branch_base() {
     refs/remotes/origin/HEAD
   do
     if have_commit "$ref"; then
-      git merge-base "$ref" "$1" 2> /dev/null || true
+      git rev-parse --verify -q "${ref}^{commit}"
       return 0
     fi
   done
+  return 1
+}
+
+default_branch_base() {
+  local tip
+  tip=$(default_branch_commit) || return 0
+  git merge-base "$tip" "$1" 2> /dev/null || true
+}
+
+fetch_commit() {
+  local sha=$1
+  have_commit "$sha" && return 0
+  git remote get-url origin > /dev/null 2>&1 || return 1
+  GIT_TERMINAL_PROMPT=0 git fetch --no-tags --no-recurse-submodules origin "$sha" > /dev/null 2>&1 ||
+    GIT_TERMINAL_PROMPT=0 git fetch --no-tags --no-recurse-submodules origin \
+      "+${sha}:refs/privacy-scan/${sha}" > /dev/null 2>&1 || return 1
+  have_commit "$sha"
 }
 
 # Scan plan. history=1 means rev_args names the commits to scan; the file list is
@@ -130,6 +147,7 @@ files_base=""
 files_head=""
 scan_rev=""
 empty_ok=0
+empty_pass=0
 
 plan_range() {
   history=1
@@ -150,6 +168,7 @@ if [[ "$mode" == "ci" ]]; then
   case "${GITHUB_EVENT_NAME-}" in
     workflow_dispatch)
       mode=all
+      plan_tree "$(resolve_commit HEAD)"
       ;;
     pull_request)
       base=$(resolve_commit "${PR_BASE-}")
@@ -161,17 +180,45 @@ if [[ "$mode" == "ci" ]]; then
       scan_rev=$merge
       ;;
     push)
-      head=$(resolve_commit "${RANGE_AFTER-}")
+      after=${RANGE_AFTER-}
       before=${RANGE_BEFORE-}
+      if [[ -z "$after" || "$after" =~ $zero_re ]]; then
+        echo "note: deleted-ref, nothing to scan" >&2
+        exit 0
+      fi
+      head=$(resolve_commit "$after")
       mode=range
-      empty_ok=1
-      if [[ -n "$before" && ! "$before" =~ $zero_re ]] && have_commit "$before" &&
-        git merge-base --is-ancestor "$before" "$head"; then
+      if [[ "${GITHUB_REF-}" == refs/tags/* ]]; then
+        tip=$(default_branch_commit || true)
+        if [[ -z "$tip" ]]; then
+          echo "missing-revision" >&2
+          exit 2
+        fi
+        echo "note: tag range vs default branch" >&2
+        history=1
+        rev_args=("$head" --not "$tip")
+        files_kind=diff
+        files_base=$tip
+        files_head=$head
+        scan_rev=$head
+        empty_pass=1
+      elif [[ -n "$before" && ! "$before" =~ $zero_re ]]; then
+        if ! have_commit "$before"; then
+          echo "note: fetching push before-commit" >&2
+          if ! fetch_commit "$before"; then
+            echo "missing-revision" >&2
+            exit 2
+          fi
+        fi
         plan_range "$(resolve_commit "$before")" "$head"
       else
-        # New branch or force push: everything since the default branch.
         base=$(default_branch_base "$head")
-        if [[ -n "$base" ]]; then
+        if [[ -n "$base" && "$base" == "$head" ]]; then
+          echo "note: merge-base equals tip, scanning reachable history" >&2
+          history=1
+          rev_args=("$head")
+          plan_tree "$head"
+        elif [[ -n "$base" ]]; then
           echo "note: range from default branch merge-base" >&2
           plan_range "$(resolve_commit "$base")" "$head"
         else
@@ -213,12 +260,15 @@ commit_count=0
 if [[ "$history" -eq 1 ]]; then
   commit_count=$(git rev-list --count "${rev_args[@]}")
   if [[ "$commit_count" -eq 0 ]]; then
+    if [[ "$empty_pass" -eq 1 ]]; then
+      echo "note: no unique commits to scan" >&2
+      exit 0
+    fi
     if [[ "$empty_ok" -ne 1 ]]; then
       echo "empty-range" >&2
       exit 2
     fi
-    # A pushed branch with no new commits: nothing new to read in history, so
-    # scan its whole tree instead.
+    # Pre-push of a branch with no unique commits: scan its whole tree.
     echo "note: no new commits, scanning the head tree" >&2
     history=0
     plan_tree "$files_head"
@@ -249,25 +299,42 @@ scripts/privacy-fixtures/fake-github-token.txt"
 # Commits of this check written before the current fixture rules. "fixture" skips a
 # fixture path whose blob has the marker (one marker per file back then); any other
 # entry skips that exact path in that exact commit.
-legacy_paths="94d496732e60e1551155b01aea4ec3ca5b2b2d04 fixture
-2542ec18fff050c167074836f8120369f5cd28d0 fixture
-e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh
-e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml"
+legacy_paths=""
 
 # PR-only: remove after squash merge
 pr_only_allow="ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh private-key
-f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh private-key"
+f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh private-key
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-user-path.txt users-path
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-user-path.txt macos-user-path
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-github-token.txt github-token
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-github-token.txt github-pat
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-private-key.txt private-key
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/keychain-password forbidden-filename
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/keychain-password keychain-password-file
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/macos-user-path.toml macos-user-path
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-user-path.txt users-path
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-user-path.txt macos-user-path
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-github-token.txt github-token
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-github-token.txt github-pat
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-private-key.txt private-key
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/keychain-password forbidden-filename
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/keychain-password keychain-password-file
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh users-path
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh macos-user-path
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh owner-device
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml users-path
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml macos-user-path"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
 historical_allow="d8001e780038c391f69367999cc41cbe9336dafa users-path
 6ef593ad25b96559b67dde593ffc5bd978689d16 users-path
 ae5c13d06ac9670c96955ece48257abdf88b9e84 owner-device
-f7c8745f7cc94f03a33b3df5167a1f76ee8dcfa1 owner-device
-c5e8e8b546bd72ae9211f84afb922d09c72cbc48 owner-device"
+f7c8745f7cc94f03a33b3df5167a1f76ee8dcfa1 owner-device"
 
 legacy_skips() {
   local commit=$1 sha entry path
+  [[ -n "$legacy_paths" ]] || return 0
   while read -r sha entry; do
     [[ "$sha" == "$commit" ]] || continue
     if [[ "$entry" != fixture ]]; then
@@ -298,29 +365,55 @@ function trim_name(seg) {
   sub(/\.+$/, "", seg)
   return tolower(seg)
 }
-function users_hit(text,    rest, seg, name) {
+function collapse_first(path,    n, i, parts, top, stack, seg) {
+  n = split(path, parts, /[\/\\]+/)
+  top = 0
+  for (i = 1; i <= n; i++) {
+    seg = parts[i]
+    if (seg == "" || seg == ".") continue
+    if (seg == "..") {
+      if (top > 0) {
+        delete stack[top]
+        top--
+      }
+      continue
+    }
+    stack[++top] = seg
+  }
+  if (top < 1) return ""
+  return stack[1]
+}
+function path_chunk(text,    n) {
+  if (match(text, /^[^ \t"'<>:;,|(){}*$?=&#%!@+~`[]+/)) {
+    return substr(text, RSTART, RLENGTH)
+  }
+  return ""
+}
+function users_hit(text,    rest, chunk, name) {
   rest = text
-  while (match(rest, /[\/\\]+[Uu][Ss][Ee][Rr][Ss][\/\\]+[^ \t\/\\"'<>:;,|(){}*$?=&#%!@+~`[]+/)) {
-    seg = substr(rest, RSTART, RLENGTH)
+  while (match(rest, /[\/\\]+[Uu][Ss][Ee][Rr][Ss][\/\\]+/)) {
     rest = substr(rest, RSTART + RLENGTH)
-    sub(/^[\/\\]+[Uu][Ss][Ee][Rr][Ss][\/\\]+/, "", seg)
-    name = trim_name(seg)
+    chunk = path_chunk(rest)
+    name = trim_name(collapse_first(chunk))
     if (name != "" && name != "runner" && name != "shared") {
       return 1
     }
+    if (chunk == "") break
+    rest = substr(rest, length(chunk) + 1)
   }
   return 0
 }
-function home_hit(text,    rest, seg, name) {
+function home_hit(text,    rest, chunk, name) {
   rest = text
-  while (match(rest, /[\/\\]+[Hh][Oo][Mm][Ee][\/\\]+[^ \t\/\\"'<>:;,|(){}*$?=&#%!@+~`[]+/)) {
-    seg = substr(rest, RSTART, RLENGTH)
+  while (match(rest, /[\/\\]+[Hh][Oo][Mm][Ee][\/\\]+/)) {
     rest = substr(rest, RSTART + RLENGTH)
-    sub(/^[\/\\]+[Hh][Oo][Mm][Ee][\/\\]+/, "", seg)
-    name = trim_name(seg)
+    chunk = path_chunk(rest)
+    name = trim_name(collapse_first(chunk))
     if (name != "" && name != "runner") {
       return 1
     }
+    if (chunk == "") break
+    rest = substr(rest, length(chunk) + 1)
   }
   return 0
 }
@@ -359,15 +452,27 @@ function say(where, n, rule) {
     print where ":" n " " rule
   }
 }
-function report(where, n, text) {
+function fixture_skip_rule(text) {
+  if (users_hit(text)) return "users-path"
+  if (home_hit(text)) return "home-path"
+  if (text ~ /(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)/) return "owner-device"
+  if (tolower(text) ~ /[a-z0-9]+-(macbook|imac|mac-mini|mac-studio|mac-pro|iphone|ipad)(-pro|-air)?(\.local)?/) return "host-device"
+  if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) return "private-key"
+  if (token_hit(text)) return "github-token"
+  return ""
+}
+function report(where, n, text,    skip) {
   if (in_list(legacy, where)) return
-  if (in_list(fixtures, where) && index(text, marker) > 0) return
-  if (users_hit(text)) say(where, n, "users-path")
-  if (home_hit(text)) say(where, n, "home-path")
-  if (text ~ /(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)/) say(where, n, "owner-device")
-  if (tolower(text) ~ /[a-z0-9]+-(macbook|imac|mac-mini|mac-studio)(-pro|-air)?(\.local)?/) say(where, n, "host-device")
-  if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) say(where, n, "private-key")
-  if (token_hit(text)) say(where, n, "github-token")
+  skip = ""
+  if (in_list(fixtures, where) && index(text, marker) > 0) {
+    skip = fixture_skip_rule(text)
+  }
+  if (users_hit(text) && skip != "users-path") say(where, n, "users-path")
+  if (home_hit(text) && skip != "home-path") say(where, n, "home-path")
+  if (text ~ /(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)/ && skip != "owner-device") say(where, n, "owner-device")
+  if (tolower(text) ~ /[a-z0-9]+-(macbook|imac|mac-mini|mac-studio|mac-pro|iphone|ipad)(-pro|-air)?(\.local)?/ && skip != "host-device") say(where, n, "host-device")
+  if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/ && skip != "private-key") say(where, n, "private-key")
+  if (token_hit(text) && skip != "github-token") say(where, n, "github-token")
 }
 function name_rules(path,    lower, base) {
   if (in_list(legacy, path)) return
@@ -415,7 +520,11 @@ found_file="$work/found"
 
 list_files() {
   if [[ "$files_kind" == diff ]]; then
-    git diff --name-only -z --no-renames --diff-filter=d "${files_base}...${files_head}"
+    if git merge-base "$files_base" "$files_head" > /dev/null 2>&1; then
+      git diff --name-only -z --no-renames --diff-filter=d "${files_base}...${files_head}"
+    else
+      git ls-tree -r -z --name-only "$files_head"
+    fi
   else
     git ls-tree -r -z --name-only "$files_head"
   fi
@@ -438,12 +547,15 @@ decode_blob() {
 leak_code=77
 
 parse_report() {
-  python3 - "$1" << 'PY'
+  PC_FIXTURES=$fixture_paths PC_MARKER=$fixture_marker PC_REPO=$repo python3 - "$1" "${2:-}" << 'PY'
 import json
 import os
+import re
+import subprocess
 import sys
 
 path = sys.argv[1]
+count_path = sys.argv[2] if len(sys.argv) > 2 else ""
 if not os.path.isfile(path):
     sys.exit(2)
 try:
@@ -453,9 +565,124 @@ except Exception:
     sys.exit(2)
 if not isinstance(data, list):
     sys.exit(2)
+
+fixtures = set()
+for item in os.environ.get("PC_FIXTURES", "").split("\n"):
+    item = item.strip()
+    if item:
+        fixtures.add(item)
+marker = os.environ.get("PC_MARKER", "")
+repo = os.environ.get("PC_REPO", "")
+strip = os.environ.get("PC_STRIP_PREFIX", "").rstrip("/")
+
+def collapse_first(path_text):
+    stack = []
+    for seg in re.split(r"[/\\]+", path_text):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if stack:
+                stack.pop()
+            continue
+        stack.append(seg)
+    if not stack:
+        return ""
+    return re.sub(r"\.+$", "", stack[0]).lower()
+
+def chunk_after(text):
+    out = []
+    stop = set(" \t\"'<>:;,|(){}*$?=&#%!@+~`[")
+    for ch in text:
+        if ch in stop:
+            break
+        out.append(ch)
+    return "".join(out)
+
+def users_hit(text):
+    rest = text
+    while True:
+        match = re.search(r"[/\\]+[Uu][Ss][Ee][Rr][Ss][/\\]+", rest)
+        if not match:
+            return False
+        rest = rest[match.end():]
+        name = collapse_first(chunk_after(rest))
+        if name and name not in ("runner", "shared"):
+            return True
+
+def home_hit(text):
+    rest = text
+    while True:
+        match = re.search(r"[/\\]+[Hh][Oo][Mm][Ee][/\\]+", rest)
+        if not match:
+            return False
+        rest = rest[match.end():]
+        name = collapse_first(chunk_after(rest))
+        if name and name != "runner":
+            return True
+
+def token_hit(text):
+    for match in re.finditer(r"ghp_[A-Za-z0-9]+", text):
+        if match.end() - match.start() >= 40:
+            return True
+    return False
+
+def skip_rule(text):
+    if users_hit(text):
+        return "users-path"
+    if home_hit(text):
+        return "home-path"
+    if re.search(r"(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)", text):
+        return "owner-device"
+    if re.search(
+        r"[a-z0-9]+-(macbook|imac|mac-mini|mac-studio|mac-pro|iphone|ipad)(-pro|-air)?(\.local)?",
+        text.lower(),
+    ):
+        return "host-device"
+    if re.search(r"BEGIN [A-Z ]*PRIVATE KEY", text):
+        return "private-key"
+    if token_hit(text):
+        return "github-token"
+    return ""
+
+SKIP_MAP = {
+    "users-path": {"users-path", "macos-user-path"},
+    "home-path": {"home-path"},
+    "owner-device": {"owner-device"},
+    "host-device": {"host-device"},
+    "private-key": {"private-key"},
+    "github-token": {"github-token", "github-pat"},
+}
+
+def read_source_line(name, lineno, commit):
+    body = b""
+    if commit:
+        proc = subprocess.run(
+            ["git", "-C", repo, "cat-file", "blob", f"{commit}:{name}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        if proc.returncode == 0:
+            body = proc.stdout
+    if not body:
+        for candidate in (name, os.path.join(repo, name)):
+            if os.path.isfile(candidate):
+                with open(candidate, "rb") as handle:
+                    body = handle.read()
+                break
+    if not body:
+        return ""
+    text = body.replace(b"\x00", b"").decode("utf-8", "replace")
+    lines = text.splitlines()
+    if 1 <= lineno <= len(lines):
+        return lines[lineno - 1]
+    return ""
+
+raw_n = 0
 for item in data:
     if not isinstance(item, dict):
         sys.exit(2)
+    raw_n += 1
     name = str(item.get("File") or "")
     if name.startswith("./"):
         name = name[2:]
@@ -466,7 +693,21 @@ for item in data:
     rule = str(item.get("RuleID") or "unknown")
     if not name or any(c in name for c in "\n\r") or any(c in rule for c in "\n\r \t"):
         name = "<unprintable>"
-    sys.stdout.write(f"{name}:{line} {rule}\n")
+    rel = name
+    if strip and rel.startswith(strip + "/"):
+        rel = rel[len(strip) + 1 :]
+    elif repo and rel.startswith(repo.rstrip("/") + "/"):
+        rel = rel[len(repo.rstrip("/")) + 1 :]
+    if rel in fixtures and marker:
+        source = read_source_line(rel, line, str(item.get("Commit") or "").strip())
+        if marker in source:
+            skip = skip_rule(source)
+            if rule in SKIP_MAP.get(skip, set()):
+                continue
+    sys.stdout.write(f"{rel}:{line} {rule}\n")
+if count_path:
+    with open(count_path, "w") as handle:
+        handle.write(str(raw_n))
 PY
 }
 
@@ -496,11 +737,12 @@ run_one_gitleaks() {
       exit 2
     fi
   fi
-  if ! parse_report "$report" > "$work/parsed"; then
+  if ! parse_report "$report" "$work/parsed.n" > "$work/parsed"; then
     echo "gitleaks-report-unreadable" >&2
     exit 2
   fi
-  n=$(wc -l < "$work/parsed" | tr -d ' ')
+  n=$(tr -d ' ' < "$work/parsed.n")
+  [[ -n "$n" ]] || n=0
   if [[ "$code" -eq 0 && "$n" -ne 0 ]] || [[ "$code" -eq "$leak_code" && "$n" -eq 0 ]]; then
     echo "gitleaks-report-mismatch" >&2
     exit 2
@@ -573,10 +815,7 @@ run_gitleaks() {
     mkdir -p "$tree/$(dirname "$file")"
     decode_blob "$scan_rev" "$file" "$tree/$file"
   done < "$work/files"
-  (
-    cd "$tree"
-    run_one_gitleaks "$work/tree.json" 0 dir .
-  )
+  PC_STRIP_PREFIX=$tree run_one_gitleaks "$work/tree.json" 0 dir "$tree"
 
   # Range only: blobs that git log still hides (UTF-16), as a tree so names stay
   # repo-relative. Not used in --all, where a flattened tree would drop the
@@ -596,10 +835,8 @@ run_gitleaks() {
       done < "$work/added"
       if [[ -n "$(find "$decoded/$commit" -type f -print -quit 2> /dev/null)" ]]; then
         GITLEAKS_FILTER_COMMIT=$commit
-        (
-          cd "$decoded/$commit"
-          run_one_gitleaks "$work/decoded-${commit}.json" 0 dir .
-        )
+        PC_STRIP_PREFIX=$decoded/$commit \
+          run_one_gitleaks "$work/decoded-${commit}.json" 0 dir "$decoded/$commit"
         unset GITLEAKS_FILTER_COMMIT
       fi
     done < "$work/commits"
@@ -616,6 +853,31 @@ is_media() {
   esac
 }
 
+media_list=""
+load_media_allowlist() {
+  local file="$repo/scripts/privacy-binary-allowlist.txt" line
+  media_list=""
+  [[ -f "$file" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    case "$line" in
+      *'*'* | *'?'* | *'['*)
+        echo "invalid-allowlist" >&2
+        exit 2
+        ;;
+    esac
+    media_list+="$line"$'\n'
+  done < "$file"
+}
+
+media_allowed() {
+  local f=$1
+  case $'\n'"$media_list" in
+    *$'\n'"$f"$'\n'*) return 0 ;;
+  esac
+  return 1
+}
+
 summary_started=0
 warn_media() {
   local safe
@@ -624,13 +886,48 @@ warn_media() {
   safe=${safe//$'\r'/%0D}
   safe=${safe//,/%2C}
   safe=${safe//::/%3A%3A}
-  printf '%s\n' "::warning file=${safe}::Added image, video, or PDF may contain screen contents. Warning only." >&2
+  printf '%s\n' "::warning file=${safe}::Allowlisted image, video, or PDF; screen contents are not text-scanned." >&2
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
   if [[ "$summary_started" -eq 0 ]]; then
     printf '%s\n' "### Privacy scan warnings" >> "$GITHUB_STEP_SUMMARY"
     summary_started=1
   fi
-  printf '%s\n' "- Warning: \`${safe}\` was added. Image, video, and PDF files may contain screen contents. This does not fail the check." >> "$GITHUB_STEP_SUMMARY"
+  printf '%s\n' "- Warning: \`${safe}\` is on the binary allowlist. Image, video, and PDF files may contain screen contents." >> "$GITHUB_STEP_SUMMARY"
+}
+
+scan_added_media() {
+  local commit file seen=$'\n'
+  load_media_allowlist
+  if [[ "$history" -eq 1 ]]; then
+    git rev-list "${rev_args[@]}" > "$work/media-commits"
+    while IFS= read -r commit; do
+      [[ -n "$commit" ]] || continue
+      git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added-media"
+      while IFS= read -r -d '' file; do
+        [[ -n "$file" ]] || continue
+        is_media "$file" || continue
+        case "$seen" in
+          *$'\n'"$file"$'\n'*) continue ;;
+        esac
+        seen+="$file"$'\n'
+        if media_allowed "$file"; then
+          warn_media "$file"
+        else
+          printf '%s\n' "$file:1 unreviewed-media" >> "$found_file"
+        fi
+      done < "$work/added-media"
+    done < "$work/media-commits"
+  else
+    while IFS= read -r -d '' file; do
+      [[ -n "$file" ]] || continue
+      is_media "$file" || continue
+      if media_allowed "$file"; then
+        warn_media "$file"
+      else
+        printf '%s\n' "$file:1 unreviewed-media" >> "$found_file"
+      fi
+    done < "$work/files"
+  fi
 }
 
 builtin_check() {
@@ -664,7 +961,6 @@ builtin_check() {
   # Commits: every message and every added line, merges against each parent.
   # A line added and removed again inside the range is still a finding.
   git rev-list --reverse "${rev_args[@]}" > "$work/commits"
-  local warned=$'\n'
   while IFS= read -r commit; do
     [[ -n "$commit" ]] || continue
     legacy=$(legacy_skips "$commit")
@@ -712,17 +1008,6 @@ builtin_check() {
     git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
     tr '\000' '\n' < "$work/added" |
       PC_COMMIT=$commit run_awk "$legacy" "$allow" "" '$0 != "" { name_rules($0) }' >> "$found_file"
-
-    while IFS= read -r -d '' file; do
-      [[ -n "$file" ]] || continue
-      case "$warned" in
-        *$'\n'"$file"$'\n'*) continue ;;
-      esac
-      if is_media "$file"; then
-        warned+="$file"$'\n'
-        warn_media "$file"
-      fi
-    done < "$work/added"
   done < "$work/commits"
 }
 
@@ -731,6 +1016,7 @@ if [[ "$use_gitleaks" -eq 1 ]]; then
 else
   builtin_check
 fi
+scan_added_media
 
 if [[ -s "$found_file" ]]; then
   redact < "$found_file" | awk '!seen[$0]++'

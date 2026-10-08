@@ -15,7 +15,7 @@ marker="fake self-test fixture"
 # Keep the user's git config (hooks path, signing, templates) out of the test repos.
 export GIT_CONFIG_GLOBAL=/dev/null
 export GIT_CONFIG_NOSYSTEM=1
-unset GITHUB_STEP_SUMMARY GITHUB_EVENT_NAME RANGE_BEFORE RANGE_AFTER PR_BASE PR_HEAD GITHUB_SHA || true
+unset GITHUB_STEP_SUMMARY GITHUB_EVENT_NAME RANGE_BEFORE RANGE_AFTER PR_BASE PR_HEAD GITHUB_SHA GITHUB_REF || true
 
 fail() {
   echo "selftest-fail $*" >&2
@@ -144,9 +144,10 @@ printf '%s\n' "{}" > "$repo/planted/.config/shortcup/settings.json"
 printf '%s\n' "x" > "$repo/planted/App.xcodeproj/xcuserdata/state.plist"
 printf '%s\n' "{}" > "$repo/build/validation-events-old.jsonl"
 printf '%s\n' "{}" > "$repo/build/validation-state.json.bak"
-# Exact fixture path: marked lines are skipped, an unmarked line is not.
+# Exact fixture path: marked lines skip only their own rule; an unmarked line is not.
 cp "$fixtures/fake-user-path.txt" "$repo/scripts/privacy-fixtures/fake-user-path.txt"
-printf '%s\n' "$fake_path/unmarked" >> "$repo/scripts/privacy-fixtures/fake-user-path.txt"
+printf '%s\n' "/Users/unmarkeduser/unmarked" >> "$repo/scripts/privacy-fixtures/fake-user-path.txt"
+printf '%s %s %s\n' "$fake_token" "$fake_path/combined" "$marker" >> "$repo/scripts/privacy-fixtures/fake-user-path.txt"
 cp "$fixtures/fake-user-path.txt" "$repo/scripts/privacy-fixtures/nested/fake-user-path.txt"
 commit_all "$repo" "plant fake fixtures"
 
@@ -156,14 +157,16 @@ has planted/fake-private-key.txt private-key 2
 for n in 2 3 4 5 6 8; do
   has planted/fake-user-path.txt users-path "$n"
 done
+has planted/fake-user-path.txt users-path 9
+has planted/fake-user-path.txt users-path 10
 has planted/fake-user-path.txt home-path 7
+has planted/fake-user-path.txt home-path 11
 for n in 2 3 4; do
   has planted/fake-device-name.txt owner-device "$n"
 done
-has planted/fake-device-name.txt host-device 5
-has planted/fake-device-name.txt host-device 6
-has planted/fake-device-name.txt host-device 7
-has planted/fake-device-name.txt host-device 8
+for n in 5 6 7 8 9 10 11 12; do
+  has planted/fake-device-name.txt host-device "$n"
+done
 has planted/fake-github-token.txt github-token 2
 has planted/keychain-password forbidden-filename
 has "planted/Users/<redacted>/notes.txt" users-path-in-name 1
@@ -178,8 +181,9 @@ for name in 가짜인증서.p12 dev.pfx app.mobileprovision dist.provisionprofil
 done
 has build/validation-events-old.jsonl runtime-output
 has build/validation-state.json.bak runtime-output
-has scripts/privacy-fixtures/fake-user-path.txt users-path 9
-[[ "$(printf '%s\n' "$out" | grep -c '^scripts/privacy-fixtures/fake-user-path.txt:')" -eq 1 ]] ||
+has scripts/privacy-fixtures/fake-user-path.txt users-path 12
+has scripts/privacy-fixtures/fake-user-path.txt github-token 13
+[[ "$(printf '%s\n' "$out" | grep -c '^scripts/privacy-fixtures/fake-user-path.txt:')" -eq 2 ]] ||
   fail exact-fixture-marked-lines-flagged
 has scripts/privacy-fixtures/nested/fake-user-path.txt users-path 2
 lacks clean/
@@ -190,22 +194,25 @@ has planted/fake-private-key.txt private-key
 for n in 2 3 4 5 6 8; do
   has planted/fake-user-path.txt macos-user-path "$n"
 done
+has planted/fake-user-path.txt macos-user-path 9
+has planted/fake-user-path.txt macos-user-path 10
 has planted/fake-user-path.txt home-path 7
+has planted/fake-user-path.txt home-path 11
 for n in 2 3 4; do
   has planted/fake-device-name.txt owner-device "$n"
 done
-has planted/fake-device-name.txt host-device 5
-has planted/fake-device-name.txt host-device 6
-has planted/fake-device-name.txt host-device 7
-has planted/fake-device-name.txt host-device 8
+for n in 5 6 7 8 9 10 11 12; do
+  has planted/fake-device-name.txt host-device "$n"
+done
 has planted/fake-github-token.txt github-pat
 has planted/keychain-password keychain-password-file
 has planted/hostname.txt host-device 1
 has planted/hostname.txt host-device 2
 has "planted/가짜인증서.p12" forbidden-filename
 has planted/.env.local forbidden-filename
-has scripts/privacy-fixtures/fake-user-path.txt macos-user-path 9
-[[ "$(printf '%s\n' "$out" | grep -c '^scripts/privacy-fixtures/fake-user-path.txt:')" -eq 1 ]] ||
+has scripts/privacy-fixtures/fake-user-path.txt macos-user-path 12
+has scripts/privacy-fixtures/fake-user-path.txt github-pat 13
+[[ "$(printf '%s\n' "$out" | grep -c '^scripts/privacy-fixtures/fake-user-path.txt:')" -eq 2 ]] ||
   fail exact-fixture-marked-lines-flagged-gitleaks
 has scripts/privacy-fixtures/nested/fake-user-path.txt macos-user-path 2
 lacks clean/
@@ -250,9 +257,8 @@ has dist.mobileprovision forbidden-filename
 has 가짜인증서.p12 forbidden-filename
 has "$add_commit" users-path 2
 has "$add_commit" owner-device 3
-grep -F -q "::warning file=shot.png::" "$tmp/err" || fail missing-warning-annotation
-grep -F -q "::warning file=Report.PDF::" "$tmp/err" || fail missing-pdf-annotation
-grep -F -q "shot.png" "$summary" || fail missing-summary-warning
+has shot.png unreviewed-media
+has Report.PDF unreviewed-media
 if grep -F -q "someone" "$summary"; then
   fail summary-leaked
 fi
@@ -314,10 +320,26 @@ set +e
 out=$(GITHUB_STEP_SUMMARY="$summary" bash "$check" --repo "$repo" --range "$png_base" "$png_head" 2> "$tmp/err")
 code=$?
 set -e
-expect 0 png-only-check
-grep -F -q "::warning file=icon.png::" "$tmp/err" || fail missing-png-warning
+expect 1 png-only-check
+has icon.png unreviewed-media
 run --repo "$repo" --range "$png_base" "$png_head" --gitleaks --config "$config"
-expect 0 png-only-gitleaks
+expect 1 png-only-gitleaks
+has icon.png unreviewed-media
+
+mkdir -p "$repo/scripts"
+printf '%s\n' "icon.png" > "$repo/scripts/privacy-binary-allowlist.txt"
+summary="$tmp/png-allowed-summary"
+: > "$summary"
+set +e
+out=$(GITHUB_STEP_SUMMARY="$summary" bash "$check" --repo "$repo" --range "$png_base" "$png_head" 2> "$tmp/err")
+code=$?
+set -e
+expect 0 png-allowlisted-check
+grep -F -q "::warning file=icon.png::" "$tmp/err" || fail missing-allowlisted-warning
+grep -F -q "icon.png" "$summary" || fail missing-allowlisted-summary
+printf '%s\n' "icon.*" > "$repo/scripts/privacy-binary-allowlist.txt"
+run --repo "$repo" --range "$png_base" "$png_head"
+expect_error png-wildcard-allowlist
 
 # 3. Content that exists only in a merge commit, removed afterwards.
 repo="$tmp/merge"
@@ -377,25 +399,78 @@ feature=$(git -C "$repo" rev-parse HEAD)
 zeros=0000000000000000000000000000000000000000
 missing=1234567890abcdef1234567890abcdef12345678
 
-for before in "$zeros" "$missing" "$other"; do
-  for extra in "" "--gitleaks"; do
-    set +e
-    out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$before" RANGE_AFTER="$feature" \
-      bash "$check" --repo "$repo" --ci $extra --config "$config" 2> "$tmp/err")
-    code=$?
-    set -e
-    expect 1 "push-fallback${extra}"
-    has leak.txt "$([[ -z "$extra" ]] && echo users-path || echo macos-user-path)"
-    lacks old.txt
-    grep -F -q "note: range from default branch merge-base" "$tmp/err" || fail push-fallback-note
-  done
+for extra in "" "--gitleaks"; do
+  set +e
+  out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$zeros" RANGE_AFTER="$feature" \
+    bash "$check" --repo "$repo" --ci $extra --config "$config" 2> "$tmp/err")
+  code=$?
+  set -e
+  expect 1 "push-new-branch${extra}"
+  has leak.txt "$([[ -z "$extra" ]] && echo users-path || echo macos-user-path)"
+  lacks old.txt
+  grep -F -q "note: range from default branch merge-base" "$tmp/err" || fail push-new-branch-note
 done
+
+for extra in "" "--gitleaks"; do
+  set +e
+  out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$other" RANGE_AFTER="$feature" \
+    bash "$check" --repo "$repo" --ci $extra --config "$config" 2> "$tmp/err")
+  code=$?
+  set -e
+  expect 1 "push-non-ancestor${extra}"
+  has leak.txt "$([[ -z "$extra" ]] && echo users-path || echo macos-user-path)"
+  lacks old.txt
+done
+
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$missing" RANGE_AFTER="$feature" \
+  bash "$check" --repo "$repo" --ci 2> "$tmp/err")
+code=$?
+set -e
+expect_error push-missing-before
 
 set +e
 out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$zeros" RANGE_AFTER="$main" bash "$check" --repo "$repo" --ci 2> "$tmp/err")
 code=$?
 set -e
-expect 0 push-new-branch-no-commits
+expect 1 push-default-branch-full-history
+has old.txt users-path
+grep -F -q "note: merge-base equals tip, scanning reachable history" "$tmp/err" || fail push-tip-history-note
+
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$main" RANGE_AFTER="$zeros" bash "$check" --repo "$repo" --ci 2> "$tmp/err")
+code=$?
+set -e
+expect 0 deleted-ref
+grep -F -q "note: deleted-ref, nothing to scan" "$tmp/err" || fail deleted-ref-note
+
+# Tag of unique (add-then-remove) history vs origin/main must fail. Tag of main passes.
+git -C "$repo" tag v-secret "$feature"
+git -C "$repo" tag v-main "$main"
+for extra in "" "--gitleaks"; do
+  set +e
+  out=$(GITHUB_EVENT_NAME=push GITHUB_REF=refs/tags/v-secret RANGE_BEFORE="$zeros" RANGE_AFTER="$feature" \
+    bash "$check" --repo "$repo" --ci $extra --config "$config" 2> "$tmp/err")
+  code=$?
+  set -e
+  expect 1 "tag-unique${extra}"
+  has leak.txt "$([[ -z "$extra" ]] && echo users-path || echo macos-user-path)"
+  lacks old.txt
+done
+set +e
+out=$(GITHUB_EVENT_NAME=push GITHUB_REF=refs/tags/v-main RANGE_BEFORE="$zeros" RANGE_AFTER="$main" \
+  bash "$check" --repo "$repo" --ci 2> "$tmp/err")
+code=$?
+set -e
+expect 0 tag-on-main
+grep -F -q "note: no unique commits to scan" "$tmp/err" || fail tag-on-main-note
+
+set +e
+out=$(GITHUB_EVENT_NAME=workflow_dispatch bash "$check" --repo "$tmp/planted" --ci 2> "$tmp/err")
+code=$?
+set -e
+expect 1 workflow-dispatch-head
+has planted/fake-user-path.txt users-path
 
 run --repo "$repo" --range "$missing" "$feature"
 expect_error bad-range-base
@@ -405,6 +480,82 @@ run --repo "$repo" --range "$feature" "$feature"
 expect_error empty-range
 run --repo "$repo" --range "$feature" "$feature" --gitleaks --config "$config"
 expect_error empty-range-gitleaks
+
+# C1: A adds a fake home path, B removes it, main is force-pushed so origin/main
+# already equals the new tip. before is the old main (not an ancestor).
+repo="$tmp/force-main"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "old main"
+old_main=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout --orphan rewritten > /dev/null 2>&1
+git -C "$repo" rm -rf --ignore-unmatch . > /dev/null 2>&1 || true
+printf '%s\n' "base" > "$repo/ok.txt"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m "new root"
+printf '%s\n' "$fake_path/force" > "$repo/secret.txt"
+commit_all "$repo" "add secret"
+git -C "$repo" rm -q secret.txt
+commit_all "$repo" "remove secret"
+new_main=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" update-ref refs/remotes/origin/main "$new_main"
+for extra in "" "--gitleaks"; do
+  set +e
+  out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$old_main" RANGE_AFTER="$new_main" \
+    bash "$check" --repo "$repo" --ci $extra --config "$config" 2> "$tmp/err")
+  code=$?
+  set -e
+  expect 1 "force-push-main${extra}"
+  has secret.txt "$([[ -z "$extra" ]] && echo users-path || echo macos-user-path)"
+done
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$zeros" RANGE_AFTER="$new_main" \
+  bash "$check" --repo "$repo" --ci 2> "$tmp/err")
+code=$?
+set -e
+expect 1 force-push-main-zero-before
+has secret.txt users-path
+
+# Missing before-commit is fetched from origin when the object is still reachable.
+bare="$tmp/force-bare.git"
+git init -q --bare "$bare"
+git -C "$bare" symbolic-ref HEAD refs/heads/main
+git -C "$bare" config uploadpack.allowReachableSHA1InWant true
+fetch_src="$tmp/force-fetch-src"
+new_repo "$fetch_src"
+printf '%s\n' "ok" > "$fetch_src/ok.txt"
+commit_all "$fetch_src" "old main"
+fetch_old=$(git -C "$fetch_src" rev-parse HEAD)
+git -C "$fetch_src" remote add origin "$bare"
+git -C "$fetch_src" push -q origin HEAD:refs/heads/main
+git -C "$fetch_src" update-ref refs/keep/old "$fetch_old"
+git -C "$fetch_src" push -q origin refs/keep/old:refs/keep/old
+git -C "$fetch_src" checkout --orphan rewritten > /dev/null 2>&1
+git -C "$fetch_src" rm -rf --ignore-unmatch . > /dev/null 2>&1 || true
+printf '%s\n' "base" > "$fetch_src/ok.txt"
+git -C "$fetch_src" add -A
+git -C "$fetch_src" commit -q -m "new root"
+printf '%s\n' "$fake_path/fetched" > "$fetch_src/secret.txt"
+commit_all "$fetch_src" "add secret"
+git -C "$fetch_src" rm -q secret.txt
+commit_all "$fetch_src" "remove secret"
+fetch_new=$(git -C "$fetch_src" rev-parse HEAD)
+git -C "$fetch_src" push -q -f origin HEAD:refs/heads/main
+ci_clone="$tmp/force-ci"
+git clone -q --no-local "$bare" "$ci_clone"
+git -C "$ci_clone" config user.email "privacy-selftest@example.invalid"
+git -C "$ci_clone" config user.name "privacy-selftest"
+if git -C "$ci_clone" cat-file -e "${fetch_old}^{commit}" 2> /dev/null; then
+  fail fetch-setup-old-already-present
+fi
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$fetch_old" RANGE_AFTER="$fetch_new" \
+  bash "$check" --repo "$ci_clone" --ci --config "$config" 2> "$tmp/err")
+code=$?
+set -e
+expect 1 force-push-fetch-before
+has secret.txt users-path
+grep -F -q "note: fetching push before-commit" "$tmp/err" || fail fetch-before-note
 
 # 5. Pull request: contents come from the merge result and the file list from
 #    base...head, so a line already removed on the base branch is not reported.

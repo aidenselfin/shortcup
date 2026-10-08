@@ -6,3 +6,7 @@ someone-MacBook-Pro.local fake self-test fixture
 AlicesFake-MacBook-Air fake self-test fixture
 someone-macbook-pro.local fake self-test fixture
 someone-imac.local fake self-test fixture
+someone-Mac-Pro.local fake self-test fixture
+someone-iPhone.local fake self-test fixture
+someone-iPad.local fake self-test fixture
+someone-mac-pro.local fake self-test fixture
