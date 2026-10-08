@@ -115,6 +115,25 @@ def same(live, recorded):
     )
 
 
+def ps_state(pid):
+    try:
+        return subprocess.check_output(
+            ["/bin/ps", "-p", str(pid), "-o", "state="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except subprocess.CalledProcessError:
+        return None
+
+
+def is_zombie(pid, live):
+    status = live.get("state")
+    if isinstance(status, int) and (status == SZOMB or (status & 0xFF) == SZOMB):
+        return True
+    state = ps_state(pid)
+    return bool(state) and state[:1] == "Z"
+
+
 def still_that_process(recorded):
     live = identity(recorded["pid"])
     if live is None:
@@ -122,9 +141,10 @@ def still_that_process(recorded):
         return pid_alive(recorded["pid"])
     if not same(live, recorded):
         return False
-    # A SIGKILL'd child stays a zombie until its parent wait()s. Treat SZOMB
-    # as gone for stop.
-    return live.get("state") != SZOMB
+    # A SIGKILL'd child stays a zombie until its parent wait()s. Treat Z as gone.
+    if is_zombie(recorded["pid"], live):
+        return False
+    return True
 
 
 def all_pids():

@@ -331,6 +331,12 @@ final class DevSelfTest {
         event.post(to: pid)
     }
 
+    func string(_ element: AXUIElement, _ name: String) -> String {
+        var value: CFTypeRef?
+        guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return "" }
+        return value as? String ?? ""
+    }
+
     func elements(_ element: AXUIElement, _ name: String) -> [AXUIElement]? {
         var value: CFTypeRef?
         guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
