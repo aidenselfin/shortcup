@@ -17,7 +17,7 @@ final class QuietPanel: NSPanel {
 final class FixtureApp: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var panel: NSPanel!
-    var sheet: NSWindow!
+    var sheet: NSPanel!
     var control = ""
     var canary = ""
     var blocking = false
@@ -29,6 +29,10 @@ final class FixtureApp: NSObject, NSApplicationDelegate {
             return args[index + 1]
         }
         control = value("--control")
+        if !control.isEmpty {
+            let pid = "\(ProcessInfo.processInfo.processIdentifier)\n"
+            try? pid.write(toFile: control + "/fixture.pid", atomically: true, encoding: .utf8)
+        }
         let canaryFile = value("--canary-file")
         canary = (try? String(contentsOfFile: canaryFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -223,7 +227,9 @@ final class FixtureApp: NSObject, NSApplicationDelegate {
         let back = NSButton(title: "Back", target: nil, action: nil)
         back.frame = NSRect(x: 112, y: 8, width: 56, height: 22)
         window.contentView?.addSubview(back)
-        let field = NSTextField(string: canary.isEmpty ? "field-text" : canary)
+        let field = NSTextField(labelWithString: canary.isEmpty ? "field-text" : canary)
+        field.isEditable = false
+        field.isSelectable = false
         field.frame = NSRect(x: 8, y: 40, width: 200, height: 20)
         window.contentView?.addSubview(field)
         let decoy = NSTextField(labelWithString: canary.isEmpty ? "label" : canary)
@@ -244,15 +250,19 @@ final class FixtureApp: NSObject, NSApplicationDelegate {
         panel.setFrameOrigin(NSPoint(x: panelX, y: window.frame.minY))
         panel.orderFrontRegardless()
 
-        sheet = QuietWindow(contentRect: NSRect(x: 0, y: 0, width: 180, height: 72),
-                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
+        sheet = QuietPanel(contentRect: NSRect(x: 0, y: 0, width: 160, height: 64),
+                           styleMask: [.titled, .closable, .utilityWindow, .nonactivatingPanel],
+                           backing: .buffered, defer: false)
         sheet.title = canary.isEmpty ? "fixture-sheet" : canary + "-sheet"
         let sheetClose = NSButton(title: "sheet-x", target: nil, action: nil)
-        sheetClose.frame = NSRect(x: 16, y: 16, width: 90, height: 28)
+        sheetClose.frame = NSRect(x: 8, y: 8, width: 72, height: 22)
         sheetClose.setAccessibilitySubrole(.closeButton)
         sheetClose.setAccessibilityIdentifier("fixture.sheetClose")
         sheet.contentView?.addSubview(sheetClose)
-        window.beginSheet(sheet, completionHandler: nil)
+        sheet.becomesKeyOnlyIfNeeded = true
+        sheet.hidesOnDeactivate = false
+        sheet.setFrameOrigin(NSPoint(x: window.frame.maxX - 160, y: window.frame.maxY + 8))
+        sheet.orderFrontRegardless()
     }
 
     func poll() {

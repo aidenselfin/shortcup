@@ -47,13 +47,18 @@ final class LiveAXWorld: AXReading {
     }
 
     private func copy(_ id: String, _ attribute: String, purpose: String) -> CFTypeRef? {
+        guard axWindowReadAllowList.contains(attribute) else {
+            log.note(attribute: attribute, purpose: purpose, text: nil)
+            return nil
+        }
         guard let element = elements[id] else {
             log.note(attribute: attribute, purpose: purpose)
             return nil
         }
         var value: CFTypeRef?
         let err = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        log.note(attribute: attribute, purpose: purpose, text: value as? String)
+        let retained: String? = purpose == "toolbar" ? nil : value as? String
+        log.note(attribute: attribute, purpose: purpose, text: retained)
         guard err == .success else { return nil }
         return value
     }
@@ -162,6 +167,14 @@ final class ClickListener {
     }
 
     func waitUntilIdle() { queue.sync {} }
+
+    #if SHORTCUP_DEV
+    func inspectHint(at point: CGPoint) -> Hint? {
+        var hint: Hint?
+        queue.sync { hint = session.inspect(at: point) }
+        return hint
+    }
+    #endif
 
     func inspectSync(at point: CGPoint) -> TimeInterval {
         var elapsed: TimeInterval = 0
@@ -426,7 +439,9 @@ final class AppController: NSObject, NSApplicationDelegate {
         panel.contentView = backdrop
     }
 
-    private func takeMonitorError() -> String? {
+    func setMonitorErrorForTesting(_ message: String?) { monitorError = message }
+
+    func takeMonitorError() -> String? {
         defer { monitorError = nil }
         return monitorError
     }
@@ -532,11 +547,21 @@ final class AppController: NSObject, NSApplicationDelegate {
     @objc private func fixtureAction() { fixture?.title = "Shortcup 검증 — 메뉴 실행됨" }
 }
 
+#if !SHORTCUP_CHECKS
 @main struct ShortcupApp {
     static func main() {
         let app = NSApplication.shared
+        #if SHORTCUP_DEV
+        // A direct executable launch does not go through LaunchServices, so the
+        // accessory policy has to be set before the run loop. --validation still
+        // switches to regular later. The self-test never passes that flag.
+        if !CommandLine.arguments.contains("--validation") {
+            app.setActivationPolicy(.accessory)
+        }
+        #endif
         let controller = AppController()
         app.delegate = controller
         withExtendedLifetime(controller) { app.run() }
     }
 }
+#endif

@@ -3,7 +3,7 @@ set -eu
 cd "${0:A:h}"
 mode="${1:-product}"
 mkdir -p build/module-cache
-swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Tests.swift -o build/checks
+swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
 ./build/checks
 if [[ "$mode" == "--checks-only" ]]; then
   print "Checks passed"

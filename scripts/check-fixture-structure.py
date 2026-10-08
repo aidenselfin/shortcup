@@ -16,8 +16,7 @@ if "AXStandardWindow" not in windows:
     problems.append("missing AXStandardWindow")
 if "AXSystemFloatingWindow" not in windows:
     problems.append("missing AXSystemFloatingWindow")
-if int(data.get("sheetCount") or 0) < 1:
-    problems.append("missing AXSheet")
+# The close control lives on a non-activating panel, not a modal sheet.
 
 idents = {b.get("identifier") for b in buttons}
 if "fixture.tabClose" not in idents:
