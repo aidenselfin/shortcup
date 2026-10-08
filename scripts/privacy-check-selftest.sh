@@ -35,7 +35,9 @@ done
 tok_head="gh"
 tok_tail="p_FAKEtokenNOTreal9xK2mQ7vB4nL8pZ3wQ8s"
 fake_token="${tok_head}${tok_tail}"
-fake_path="/Users/someone/fake-not-a-real-home"
+fake_user="someone"
+fake_path="/Users/${fake_user}/fake-not-a-real-home"
+fake_device="Someone-Fake'""s MacBook"
 
 tmp=$(mktemp -d)
 cleanup() {
@@ -120,13 +122,13 @@ lacks() {
 # 1. Planted values in a tree: every rule, both detectors, exact fixture paths.
 repo="$tmp/planted"
 new_repo "$repo"
-mkdir -p "$repo/planted/Users/someone" "$repo/clean" "$repo/scripts/privacy-fixtures/nested" \
+mkdir -p "$repo/planted/Users/$fake_user" "$repo/clean" "$repo/scripts/privacy-fixtures/nested" \
   "$repo/planted/.config/shortcup" "$repo/planted/App.xcodeproj/xcuserdata" "$repo/build"
 cp "$fixtures/fake-private-key.txt" "$fixtures/fake-user-path.txt" "$fixtures/fake-device-name.txt" "$repo/planted/"
 printf '# %s\n%s %s\n' "$marker" "$fake_token" "$marker" > "$repo/planted/fake-github-token.txt"
 printf '%s\n' "placeholder-not-a-password $marker" > "$repo/planted/keychain-password"
 cp "$fixtures/clean-users-path.txt" "$repo/clean/"
-printf '%s\n' "ok" > "$repo/planted/Users/someone/notes.txt"
+printf '%s\n' "ok" > "$repo/planted/Users/$fake_user/notes.txt"
 printf '%s\n' "$fake_path/utf16" | iconv -f UTF-8 -t UTF-16 > "$repo/planted/utf16.txt"
 printf 'bin\000%s\000\n' "$fake_path/binary" > "$repo/planted/binary.dat"
 for name in 가짜인증서.p12 dev.pfx app.mobileprovision dist.provisionprofile Signing.certSigningRequest \
@@ -210,7 +212,7 @@ git -C "$repo" mv notes.txt dist.mobileprovision
 git -C "$repo" commit -q -F - << EOF
 add fakes
 ${fake_path}/in-message
-Someone-Fake's MacBook
+${fake_device}
 EOF
 add_commit=$(git -C "$repo" rev-parse HEAD)
 git -C "$repo" rm -q -- added-path.txt m1.txt shot.png Report.PDF .env.local 가짜인증서.p12 dist.mobileprovision

@@ -597,9 +597,10 @@ builtin_check() {
         }
       ' >> "$found_file"
 
-    # Added names per commit. --no-renames turns a rename into delete plus add,
-    # and -z keeps non-ASCII names unquoted.
-    git log -1 -z -m --no-renames --diff-filter=A --name-only --format= "$commit" > "$work/added"
+    # Added names of this commit only (git log --diff-filter would walk back to an
+    # earlier commit). --no-renames turns a rename into delete plus add, -m covers
+    # each merge parent, and -z keeps non-ASCII names unquoted.
+    git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
     tr '\000' '\n' < "$work/added" |
       run_awk "$legacy" "$allow" "" '$0 != "" { name_rules($0) }' >> "$found_file"
 

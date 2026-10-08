@@ -13,7 +13,7 @@ id = "forbidden-filename"
 description = "signing, keychain, environment, or Xcode user files"
 path = '''(?i)(?:\.(?:p12|pem|key|cer|p8|pfx|mobileprovision|provisionprofile|keychain|keychain-db|certsigningrequest)$|(?:^|/)\.env(?:\..*)?$|(?:^|/)xcuserdata/|(?:^|/)\.config/shortcup/|(?:^|/)validation-(?:events|state|results)[^/]*$|(?:^|/)validation-fixtures/)'''
 
-# Home directories in any spelling: /Users/x, \/Users\/x (JSON), /users/x, C:\Users\x,
+# Home directories in any spelling: slash or backslash, JSON-escaped, any letter case,
 # and non-ASCII names. Only runner and Shared are allowed. The secret group leaves out
 # the leading slash so the default config's allowlist for plain Unix paths never applies.
 [[rules]]
