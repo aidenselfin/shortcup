@@ -50,6 +50,12 @@ description = "owner name followed by a device name"
 regex = '''(?:의|'s|’s) (?:Mac|MacBook|iMac|iPhone|iPad)'''
 keywords = ["mac", "iphone", "ipad"]
 
+[[rules]]
+id = "host-device"
+description = "default macOS host name with a person-like prefix"
+regex = '''[A-Za-z0-9]+-(?:MacBook|iMac|Mac-mini|Mac-Studio)(?:-Pro|-Air)?(?:\.local)?'''
+keywords = ["macbook", "imac", "mac-mini", "mac-studio"]
+
 # Self-test fixtures: exact path and the fake marker on the same line. Same rule as
 # scripts/privacy-check.sh.
 [[allowlists]]

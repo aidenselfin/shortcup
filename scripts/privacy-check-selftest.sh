@@ -38,6 +38,7 @@ fake_token="${tok_head}${tok_tail}"
 fake_user="someone"
 fake_path="/Users/${fake_user}/fake-not-a-real-home"
 fake_device="Someone-Fake'""s MacBook"
+fake_host="${fake_user}-MacBook-Pro.local"
 
 tmp=$(mktemp -d)
 cleanup() {
@@ -129,6 +130,7 @@ printf '# %s\n%s %s\n' "$marker" "$fake_token" "$marker" > "$repo/planted/fake-g
 printf '%s\n' "placeholder-not-a-password $marker" > "$repo/planted/keychain-password"
 cp "$fixtures/clean-users-path.txt" "$repo/clean/"
 printf '%s\n' "ok" > "$repo/planted/Users/$fake_user/notes.txt"
+printf '%s\n' "$fake_host" > "$repo/planted/hostname.txt"
 printf '%s\n' "$fake_path/utf16" | iconv -f UTF-8 -t UTF-16 > "$repo/planted/utf16.txt"
 printf 'bin\000%s\000\n' "$fake_path/binary" > "$repo/planted/binary.dat"
 for name in 가짜인증서.p12 dev.pfx app.mobileprovision dist.provisionprofile Signing.certSigningRequest \
@@ -155,11 +157,14 @@ has planted/fake-user-path.txt home-path 7
 for n in 2 3 4; do
   has planted/fake-device-name.txt owner-device "$n"
 done
+has planted/fake-device-name.txt host-device 5
+has planted/fake-device-name.txt host-device 6
 has planted/fake-github-token.txt github-token 2
 has planted/keychain-password forbidden-filename
 has "planted/Users/<redacted>/notes.txt" users-path-in-name 1
 has planted/utf16.txt users-path
 has planted/binary.dat users-path
+has planted/hostname.txt host-device
 for name in 가짜인증서.p12 dev.pfx app.mobileprovision dist.provisionprofile Signing.certSigningRequest \
   login.keychain login.keychain-db AuthKey.p8 .env.local .config/shortcup/settings.json \
   App.xcodeproj/xcuserdata/state.plist; do
@@ -183,8 +188,11 @@ has planted/fake-user-path.txt home-path 7
 for n in 2 3 4; do
   has planted/fake-device-name.txt owner-device "$n"
 done
+has planted/fake-device-name.txt host-device 5
+has planted/fake-device-name.txt host-device 6
 has planted/fake-github-token.txt github-pat
 has planted/keychain-password keychain-password-file
+has planted/hostname.txt host-device
 has "planted/가짜인증서.p12" forbidden-filename
 has planted/.env.local forbidden-filename
 has scripts/privacy-fixtures/fake-user-path.txt macos-user-path 9
@@ -247,10 +255,60 @@ has m1.txt macos-user-path 2
 has dist.mobileprovision forbidden-filename
 
 run --repo "$repo" --all
-expect 0 range-head-tree
+expect 1 range-head-messages
+has "$add_commit" users-path
+has "$add_commit" owner-device
+lacks added-path.txt
 run --repo "$repo" --all --gitleaks --config "$config"
 expect 1 range-full-history
 has added-path.txt macos-user-path
+
+# 2b. Binary/UTF-16 added then removed must fail the range. A PNG-only commit
+# must pass both checks and only warn.
+repo="$tmp/binary"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+bin_base=$(git -C "$repo" rev-parse HEAD)
+printf 'bin\000%s\n' "$fake_path/binary-range" > "$repo/bin.dat"
+printf '%s\n' "$fake_path/utf16-range" | iconv -f UTF-8 -t UTF-16 > "$repo/utf16-le.txt"
+printf '%s\n\000%s\n%s\n' "-----BEGIN FAKE PRIVATE KEY-----" "FAKE-NOT-A-REAL-PRIVATE-KEY-MATERIAL-FAKE-NOT-A-REAL-PRIVATE-KEY-MATERIAL-" "-----END FAKE PRIVATE KEY-----" > "$repo/bin-key.txt"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m "add binary fakes"
+git -C "$repo" rm -q -- bin.dat utf16-le.txt bin-key.txt
+git -C "$repo" commit -q -m "remove binary fakes"
+bin_head=$(git -C "$repo" rev-parse HEAD)
+
+run --repo "$repo" --range "$bin_base" "$bin_head"
+expect 1 binary-range-check
+has bin.dat users-path
+has utf16-le.txt users-path
+has bin-key.txt private-key
+run --repo "$repo" --range "$bin_base" "$bin_head" --gitleaks --config "$config"
+expect 1 binary-range-gitleaks
+has bin.dat macos-user-path
+has utf16-le.txt macos-user-path
+has bin-key.txt private-key
+
+repo="$tmp/png"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+png_base=$(git -C "$repo" rev-parse HEAD)
+printf 'PNG\000not-a-screenshot\n' > "$repo/icon.png"
+git -C "$repo" add icon.png
+git -C "$repo" commit -q -m "add icon"
+png_head=$(git -C "$repo" rev-parse HEAD)
+summary="$tmp/png-summary"
+: > "$summary"
+set +e
+out=$(GITHUB_STEP_SUMMARY="$summary" bash "$check" --repo "$repo" --range "$png_base" "$png_head" 2> "$tmp/err")
+code=$?
+set -e
+expect 0 png-only-check
+grep -F -q "::warning file=icon.png::" "$tmp/err" || fail missing-png-warning
+run --repo "$repo" --range "$png_base" "$png_head" --gitleaks --config "$config"
+expect 0 png-only-gitleaks
 
 # 3. Content that exists only in a merge commit, removed afterwards.
 repo="$tmp/merge"

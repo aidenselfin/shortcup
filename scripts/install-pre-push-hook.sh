@@ -81,12 +81,21 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [[ -n "${local_sha:-}" ]] || continue
   # Branch deletion: nothing is published.
   [[ "$local_sha" =~ $zero ]] && continue
-  # New branch, unknown remote commit, or force push: every pushed commit that is
-  # not already on this remote, and every file in the pushed commit. Never HEAD or
-  # the working tree.
-  if [[ "$remote_sha" =~ $zero ]] || ! git cat-file -e "${remote_sha}^{commit}" 2> /dev/null ||
-    ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+  # Never HEAD or the working tree. New branch (remote sha all zeros): every
+  # commit not already on this remote, and every file in the pushed commit.
+  # Force-push (remote sha missing or not an ancestor): from origin/main when
+  # that ref exists, otherwise the same new-branch range.
+  if [[ "$remote_sha" =~ $zero ]]; then
     set -- --new-branch "$local_sha" "$remote"
+  elif ! git cat-file -e "${remote_sha}^{commit}" 2> /dev/null ||
+    ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
+    if git cat-file -e "refs/remotes/${remote}/main^{commit}" 2> /dev/null; then
+      set -- --range "$(git merge-base "refs/remotes/${remote}/main" "$local_sha")" "$local_sha"
+    elif git cat-file -e "origin/main^{commit}" 2> /dev/null; then
+      set -- --range "$(git merge-base origin/main "$local_sha")" "$local_sha"
+    else
+      set -- --new-branch "$local_sha" "$remote"
+    fi
   else
     set -- --range "$remote_sha" "$local_sha"
   fi

@@ -106,8 +106,14 @@ resolve_commit() {
 }
 
 default_branch_base() {
-  local ref
-  for ref in refs/remotes/origin/main refs/remotes/origin/HEAD; do
+  local ref branch=${DEFAULT_BRANCH:-main}
+  for ref in \
+    "refs/remotes/origin/${branch}" \
+    "origin/${branch}" \
+    refs/remotes/origin/main \
+    origin/main \
+    refs/remotes/origin/HEAD
+  do
     if have_commit "$ref"; then
       git merge-base "$ref" "$1" 2> /dev/null || true
       return 0
@@ -230,6 +236,8 @@ trap cleanup EXIT
 
 # Self-test fixtures: exact paths only, and a line is skipped only when it carries
 # the fake marker itself. Same rule as the fixture allowlist in .gitleaks.toml.
+# keychain-password and fake-github-token.txt are not in HEAD; they exist only in
+# the first commits of this check and stay listed so those commits can skip them.
 fixture_marker="fake self-test fixture"
 fixture_paths="scripts/privacy-fixtures/fake-private-key.txt
 scripts/privacy-fixtures/fake-user-path.txt
@@ -342,6 +350,7 @@ function report(where, n, text) {
   if (users_hit(text)) say(where, n, "users-path")
   if (home_hit(text)) say(where, n, "home-path")
   if (text ~ /(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)/) say(where, n, "owner-device")
+  if (text ~ /[A-Za-z0-9]+-(MacBook|iMac|Mac-mini|Mac-Studio)(-Pro|-Air)?(\.local)?/) say(where, n, "host-device")
   if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) say(where, n, "private-key")
   if (token_hit(text)) say(where, n, "github-token")
 }
@@ -394,6 +403,18 @@ list_files() {
   fi
 }
 list_files > "$work/files"
+
+# UTF-16 with a BOM becomes UTF-8. Other blobs drop NUL so a binary patch is text.
+decode_blob() {
+  local rev=$1 file=$2 dest=$3 bom
+  git cat-file blob "${rev}:${file}" > "$work/blob"
+  bom=$(head -c 2 "$work/blob" | od -An -tx1 | tr -d ' \n')
+  if [[ "$bom" == fffe || "$bom" == feff ]] &&
+    iconv -f UTF-16 -t UTF-8 < "$work/blob" > "$dest" 2> /dev/null; then
+    return 0
+  fi
+  tr -d '\000' < "$work/blob" > "$dest"
+}
 
 # gitleaks exits 1 on its own errors too, so leaks get a distinct code.
 leak_code=77
@@ -487,27 +508,58 @@ run_gitleaks() {
   # History. -m shows each merge against every parent, so content that exists only
   # in a merge commit is scanned too. --no-renames makes a pure rename an add, so
   # path rules see the new name.
+  # --text so a blob with NUL is a patch, not "Binary files differ". Without it
+  # gitleaks reports 0 commits for a PNG-only change and the check would error.
   if [[ "$mode" == all ]]; then
     run_one_gitleaks "$work/history.json" "$(git rev-list --count --all)" \
-      git --log-opts="--all -m --no-renames" "$repo"
+      git --log-opts="--all --text -m --no-renames" "$repo"
   elif [[ "$history" -eq 1 ]]; then
     run_one_gitleaks "$work/history.json" "$commit_count" \
-      git --log-opts="-m --no-renames ${rev_args[*]}" "$repo"
+      git --log-opts="--text -m --no-renames ${rev_args[*]}" "$repo"
   fi
 
   # Tree. The listed files as they are in scan_rev (the merge result on PRs),
-  # never the working directory.
-  local tree="$work/tree" file
+  # never the working directory. Decode so UTF-16 and NUL blobs are readable.
+  local tree="$work/tree" file commit
   mkdir -p "$tree"
   while IFS= read -r -d '' file; do
     [[ "$(git cat-file -t "${scan_rev}:${file}" 2> /dev/null)" == blob ]] || continue
     mkdir -p "$tree/$(dirname "$file")"
-    git cat-file blob "${scan_rev}:${file}" > "$tree/$file"
+    decode_blob "$scan_rev" "$file" "$tree/$file"
   done < "$work/files"
   (
     cd "$tree"
     run_one_gitleaks "$work/tree.json" 0 dir .
   )
+
+  # Range only: blobs that git log still hides (UTF-16), as a tree so names stay
+  # repo-relative. Not used in --all, where a flattened tree would drop the
+  # commit-SHA allowlist and re-flag historical files.
+  if [[ "$history" -eq 1 ]]; then
+    local decoded="$work/decoded"
+    mkdir -p "$decoded"
+    if [[ "$mode" == all ]]; then
+      git rev-list --all > "$work/commits"
+    else
+      git rev-list "${rev_args[@]}" > "$work/commits"
+    fi
+    while IFS= read -r commit; do
+      [[ -n "$commit" ]] || continue
+      git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
+      while IFS= read -r -d '' file; do
+        [[ -n "$file" ]] || continue
+        [[ "$(git cat-file -t "${commit}:${file}" 2> /dev/null)" == blob ]] || continue
+        mkdir -p "$decoded/$(dirname "$file")"
+        decode_blob "$commit" "$file" "$decoded/$file"
+      done < "$work/added"
+    done < "$work/commits"
+    if find "$decoded" -type f -print -quit | grep -q .; then
+      (
+        cd "$decoded"
+        run_one_gitleaks "$work/decoded.json" 0 dir .
+      )
+    fi
+  fi
 }
 
 is_media() {
@@ -547,16 +599,21 @@ builtin_check() {
   while IFS= read -r -d '' file; do
     kind=$(git cat-file -t "${scan_rev}:${file}" 2> /dev/null || true)
     [[ "$kind" == blob ]] || continue
-    git cat-file blob "${scan_rev}:${file}" > "$work/blob"
-    bom=$(head -c 2 "$work/blob" | od -An -tx1 | tr -d ' \n')
-    if [[ "$bom" == fffe || "$bom" == feff ]] &&
-      iconv -f UTF-16 -t UTF-8 < "$work/blob" > "$work/text" 2> /dev/null; then
-      :
-    else
-      tr -d '\000' < "$work/blob" > "$work/text"
-    fi
+    decode_blob "$scan_rev" "$file" "$work/text"
     run_awk "" "" "$file" '{ report(where, FNR, $0) }' "$work/text" >> "$found_file"
   done < "$work/files"
+
+  # Full mode also reads every commit message. File contents stay the HEAD tree.
+  if [[ "$mode" == all ]]; then
+    git rev-list --all > "$work/commits"
+    while IFS= read -r commit; do
+      [[ -n "$commit" ]] || continue
+      allow=$(allowed_rules "$commit")
+      git log -1 --format=%B "$commit" | tr -d '\000' |
+        run_awk "" "$allow" "$commit" '$0 != "" { report(where, FNR, $0) }' >> "$found_file"
+    done < "$work/commits"
+    return 0
+  fi
 
   [[ "$history" -eq 1 ]] || return 0
 
@@ -574,7 +631,7 @@ builtin_check() {
 
     # Headers are read only until the first @@ of each file, so an added line whose
     # text looks like "++ /dev/null" is still treated as content.
-    git -c core.quotePath=false log -1 -m -p -U0 --no-color --no-ext-diff --format= "$commit" |
+    git -c core.quotePath=false log -1 -m -p -U0 --text --no-color --no-ext-diff --format= "$commit" |
       tr -d '\000' |
       run_awk "$legacy" "$allow" "" '
         /^diff --git / { file = ""; header = 1; newline = 0; next }

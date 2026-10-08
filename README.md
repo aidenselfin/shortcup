@@ -61,3 +61,7 @@ bash scripts/install-pre-push-hook.sh
 - 기존 pre-push 훅이 있으면 설치를 멈춥니다. 바꾸려면 `--force`를 붙이세요.
 - [gitleaks](https://github.com/gitleaks/gitleaks)가 필요합니다. 없으면 푸시를 거부합니다. 잠시 건너뛰려면 `SHORTCUP_PRIVACY_SKIP_GITLEAKS=1 git push`를 쓰세요. 경고가 출력됩니다.
 - 검사 스크립트를 고친 뒤에는 `--force`로 다시 설치하세요.
+
+`.gitleaks.toml`의 과거 커밋 SHA 허용 목록은 squash 또는 merge commit으로 합치는 것을 전제로 합니다. rebase로 그 커밋의 SHA가 바뀌면 허용이 풀리고 검사가 다시 실패할 수 있습니다.
+
+이 검사가 실제로 막으려면 저장소 주인이 GitHub에서 `privacy-scan`을 필수 검사로 두고, 코드 오너 리뷰를 켜 두어야 합니다. 워크플로 파일만으로는 강제되지 않습니다.
