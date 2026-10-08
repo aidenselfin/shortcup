@@ -9,6 +9,7 @@ import ctypes
 import errno
 import os
 import pty
+import re
 import select
 import stat
 import sys
@@ -330,8 +331,9 @@ def set_partition_list_security(keychain_path, password):
 
     security set-key-partition-list without -k calls getpass() on its
     controlling tty. A private pty is that tty, so this does not hang and
-    does not prompt on the caller's terminal. The password is written only
-    after a prompt that contains "password". Raw pty bytes are never logged.
+    does not prompt on the caller's terminal.     The password is written only after a C-locale prompt whose line or token
+    has an allow-listed prefix (password, passphrase, passwd). Raw pty bytes
+    are never logged.
     """
     argv = [
         "/usr/bin/security",
@@ -352,13 +354,34 @@ def set_partition_list_security(keychain_path, password):
     prompt = b""
     child_status = None
     deadline = time.monotonic() + 20
+    # C-locale getpass lines. Match a line or token prefix, not a mid-word substring.
     prompt_prefixes = (
-        b"password:",
-        b"password ",
+        b"password",
+        b"passphrase",
+        b"passwd",
         b"enter password",
-        b"passphrase:",
-        b"pass phrase:",
+        b"enter the password",
+        b"keychain password",
+        b"unlock keychain",
+        b"please enter",
     )
+    prompt_tokens = (b"password", b"passphrase", b"passwd")
+
+    def prompt_ready(buf):
+        text = buf.lower().replace(b"\r", b"\n")
+        text = re.sub(br"\x1b\[[0-9;]*[A-Za-z]", b"", text)
+        text = bytes(ch for ch in text if ch >= 32 or ch in (9, 10, 13))
+        for line in text.split(b"\n"):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if any(stripped.startswith(prefix) for prefix in prompt_prefixes):
+                return True
+            for token in stripped.split():
+                token = token.strip(b":.*[]()")
+                if any(token.startswith(prefix) for prefix in prompt_tokens):
+                    return True
+        return False
 
     def reap(hang=False):
         nonlocal child_status
@@ -394,13 +417,7 @@ def set_partition_list_security(keychain_path, password):
                     continue
                 if not sent:
                     prompt += chunk.lower().replace(b"\r", b"\n")
-                    ready = False
-                    for line in prompt.split(b"\n"):
-                        stripped = line.strip()
-                        if any(stripped.startswith(prefix) for prefix in prompt_prefixes):
-                            ready = True
-                            break
-                    if ready:
+                    if prompt_ready(prompt):
                         os.write(fd, password + b"\n")
                         sent = True
                         prompt = b""
@@ -415,6 +432,8 @@ def set_partition_list_security(keychain_path, password):
                 except OSError:
                     pass
                 reap(hang=True)
+                if not sent:
+                    fail("security set-key-partition-list had no allowed password prompt")
                 fail("security set-key-partition-list did not finish")
         if child_status is None:
             fail("security set-key-partition-list did not finish")
