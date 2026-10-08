@@ -29,6 +29,11 @@ PASS = [
     (b"password to unlock " + KC.encode() + b":", "password to unlock %s:"),
     (b"password to unlock " + BASE.encode() + b":", "password to unlock %s:"),
     (b"\x1b[?1034hpassword to unlock " + KC.encode() + b": ", "password to unlock %s:"),
+    (
+        b"(deprecated) password to unlock " + KC.encode() + b": ",
+        "(deprecated) password to unlock %s:",
+    ),
+    (b"(deprecated) password:", "(deprecated) password:"),
     (b"password for " + KC.encode() + b":", "password for %s:"),
     (b'password for "' + BASE.encode() + b'":', 'password for "%s":'),
 ]
@@ -46,6 +51,8 @@ FAIL = [
     b"please enter the password:",
     b"password",
     b"password to unlock " + KC.encode(),
+    b"(deprecated) error: bad password for item:",
+    b"(deprecated) please enter the password:",
 ]
 
 

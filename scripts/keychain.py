@@ -340,6 +340,8 @@ SECURITY_PROMPT_EXACT = (
     b"retype new password:",
     b"enter password:",
 )
+# File-based keychain APIs on current macOS prefix getpass with this token.
+SECURITY_PROMPT_PREFIXES = (b"", b"(deprecated) ")
 CSI = re.compile(br"\x1b\[[?\d;]*[A-Za-z]|\x1b[@-Z\\-_]|\x1b\][^\x07]*\x07|\[\?[0-9]+[hl]")
 
 
@@ -365,16 +367,22 @@ def match_security_prompt(line, keychain_path):
     """Return the allow-listed template name, or None.
 
     The line, with trailing whitespace stripped, must end with ':' and equal
-    one of the C-locale security(1) prompts. The keychain path is substituted
-    into the '%s' forms internally and never returned.
+    one of the C-locale security(1) prompts, optionally prefixed with
+    '(deprecated) '. The keychain path is substituted into the '%s' forms
+    internally and never returned.
     """
     stripped = clean_pty_text(line).replace(b"\n", b"").rstrip()
     if not stripped.endswith(b":"):
         return None
     lower = stripped.lower()
-    for exact in SECURITY_PROMPT_EXACT:
-        if lower == exact:
-            return exact.decode("ascii")
+    for prefix in SECURITY_PROMPT_PREFIXES:
+        rest = lower[len(prefix) :] if lower.startswith(prefix) else None
+        if rest is None:
+            continue
+        for exact in SECURITY_PROMPT_EXACT:
+            if rest == exact:
+                name = exact.decode("ascii")
+                return (prefix.decode("ascii") + name) if prefix else name
     path = keychain_path.encode() if isinstance(keychain_path, str) else keychain_path
     names = [path, os.path.basename(path)]
     try:
@@ -398,9 +406,13 @@ def match_security_prompt(line, keychain_path):
                 ('password for "%s":', b'password for "' + item + b'":'),
             )
         )
-    for name, expected in named:
-        if lower == expected.lower():
-            return name
+    for prefix in SECURITY_PROMPT_PREFIXES:
+        rest = lower[len(prefix) :] if lower.startswith(prefix) else None
+        if rest is None:
+            continue
+        for name, expected in named:
+            if rest == expected.lower():
+                return (prefix.decode("ascii") + name) if prefix else name
     return None
 
 
@@ -411,9 +423,10 @@ def set_partition_list_security(keychain_path, password):
     controlling tty. A private pty is that tty, so this does not hang and
     does not prompt on the caller's terminal. The password is written only
     after a C-locale prompt that equals an allow-listed security(1) string
-    (trailing whitespace stripped, must end with ':'). Raw pty bytes are
-    never logged. Diagnostics report byte count, whether a prompt matched
-    and which template, and the child exit status.
+    (trailing whitespace stripped, must end with ':', optional
+    '(deprecated) ' prefix). Raw pty bytes are never logged. Diagnostics
+    report byte count, whether a prompt matched and which template, and
+    the child exit status.
     """
     argv = [
         "/usr/bin/security",
