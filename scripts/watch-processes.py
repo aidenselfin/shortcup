@@ -18,6 +18,7 @@ Usage: watch-processes.py -- CMD...
 import ctypes
 import json
 import os
+import pty
 import select
 import shutil
 import signal
@@ -197,20 +198,20 @@ def eslogger_wanted():
     return os.environ.get("GITHUB_ACTIONS") == "true"
 
 
-def start_eslogger():
-    eslogger = "/usr/bin/eslogger"
-    if not os.path.isfile(eslogger):
-        return None
+def _start_eslogger_pipe(argv):
     try:
+        # New session: eslogger mutes its own process group, so the watched
+        # verify tree and dummy-true must not share that group.
         proc = subprocess.Popen(
-            ["sudo", "-n", eslogger, "exec", "fork"],
+            argv,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except OSError:
         return None
-    deadline = time.monotonic() + 1.0
+    deadline = time.monotonic() + 0.8
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             return None
@@ -218,19 +219,122 @@ def start_eslogger():
     if proc.poll() is not None:
         return None
     proc._es_buf = b""
-    if proc.stdout is not None:
+    proc._es_fd = proc.stdout.fileno() if proc.stdout is not None else None
+    if proc._es_fd is not None:
         try:
-            os.set_blocking(proc.stdout.fileno(), False)
+            os.set_blocking(proc._es_fd, False)
         except (AttributeError, OSError, ValueError):
             pass
     return proc
+
+
+def _start_eslogger_pty(argv):
+    try:
+        pid, fd = pty.fork()
+    except OSError:
+        return None
+    if pid == 0:
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        try:
+            os.execv(argv[0], argv)
+        except OSError:
+            os._exit(127)
+        os._exit(127)
+    deadline = time.monotonic() + 0.8
+    while time.monotonic() < deadline:
+        waited, _status = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return None
+        time.sleep(0.05)
+    try:
+        os.set_blocking(fd, False)
+    except (AttributeError, OSError, ValueError):
+        pass
+
+    class PtyProc:
+        def __init__(self, pid, fd):
+            self.pid = pid
+            self._es_fd = fd
+            self._es_buf = b""
+            self.stdout = self
+            self.returncode = None
+
+        def fileno(self):
+            return self._es_fd
+
+        def poll(self):
+            if self.returncode is not None:
+                return self.returncode
+            try:
+                waited, status = os.waitpid(self.pid, os.WNOHANG)
+            except ChildProcessError:
+                self.returncode = 0
+                return 0
+            if waited == self.pid:
+                self.returncode = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+                return self.returncode
+            return None
+
+        def terminate(self):
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+        def kill(self):
+            try:
+                os.kill(self.pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+        def wait(self, timeout=None):
+            deadline = time.monotonic() + (timeout if timeout is not None else 1e9)
+            while time.monotonic() < deadline:
+                code = self.poll()
+                if code is not None:
+                    return code
+                time.sleep(0.05)
+            raise subprocess.TimeoutExpired(cmd="eslogger", timeout=timeout)
+
+    return PtyProc(pid, fd)
+
+
+def start_eslogger():
+    eslogger = "/usr/bin/eslogger"
+    if not os.path.isfile(eslogger):
+        return None
+    event_sets = (
+        ["exec", "fork"],
+        ["exec", "fork", "spawn"],
+        ["exec", "fork", "posix_spawn"],
+    )
+    for events in event_sets:
+        argv = ["sudo", "-n", eslogger, *events]
+        proc = _start_eslogger_pipe(argv)
+        if proc is None:
+            proc = _start_eslogger_pty(argv)
+        if proc is not None:
+            proc._es_events = ",".join(events)
+            return proc
+    return None
 
 
 def eslogger_hits(proc, verify_pid, ignore_pids, lib):
     hits = []
     if proc is None or proc.stdout is None:
         return hits
-    fd = proc.stdout.fileno()
+    fd = getattr(proc, "_es_fd", None)
+    if fd is None and proc.stdout is not None:
+        fd = proc.stdout.fileno()
+    if fd is None:
+        return hits
     buf = getattr(proc, "_es_buf", b"")
     while True:
         try:
@@ -251,6 +355,8 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
         proc._es_bytes = getattr(proc, "_es_bytes", 0) + len(chunk)
     if b"dummy-true" in buf:
         proc._es_raw_dummy = True
+    if b"/build/" in buf or b"watch-dummy" in buf:
+        proc._es_has_build = True
     text = buf.decode("utf-8", "replace")
     decoder = json.JSONDecoder()
     index = 0
@@ -332,7 +438,8 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 pass
             return False
     loop = subprocess.Popen(["/bin/zsh", "-c", "while true; do " + str(dummy) + "; done"])
-    seen_eslogger = False
+    seen_eslogger_json = False
+    seen_eslogger_raw = False
     seen_polling = False
     try:
         wait_s = SELF_CHECK_SHORT_ESLOGGER if require_eslogger else SELF_CHECK_SHORT
@@ -342,10 +449,10 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 try:
                     for _pid, path, reason in eslogger_hits(es_proc, loop.pid, ignore_pids, lib):
                         if reason == "executable under build/" and "dummy-true" in str(path):
-                            seen_eslogger = True
+                            seen_eslogger_json = True
                             break
                     if getattr(es_proc, "_es_raw_dummy", False):
-                        seen_eslogger = True
+                        seen_eslogger_raw = True
                 except RuntimeError:
                     es_proc = None
                     if require_eslogger:
@@ -362,15 +469,18 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 ):
                     seen_polling = True
                     break
-            if require_eslogger and seen_eslogger:
+            if require_eslogger and (seen_eslogger_json or seen_eslogger_raw):
                 break
-            if not require_eslogger and (seen_eslogger or seen_polling):
+            if not require_eslogger and (seen_eslogger_json or seen_eslogger_raw or seen_polling):
                 break
             time.sleep(0.02)
         if require_eslogger:
-            if seen_eslogger:
+            if seen_eslogger_json or seen_eslogger_raw:
+                path_name = "eslogger json" if seen_eslogger_json else "eslogger raw"
                 print(
-                    "PASS: process watcher eslogger detected a short-lived executable under build/",
+                    "PASS: process watcher "
+                    + path_name
+                    + " detected a short-lived executable under build/",
                     flush=True,
                 )
                 return True
@@ -381,12 +491,21 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 + " json="
                 + str(getattr(es_proc, "_es_json", 0) if es_proc is not None else 0)
                 + " raw_dummy="
-                + ("1" if es_proc is not None and getattr(es_proc, "_es_raw_dummy", False) else "0"),
+                + ("1" if es_proc is not None and getattr(es_proc, "_es_raw_dummy", False) else "0")
+                + " has_build="
+                + ("1" if es_proc is not None and getattr(es_proc, "_es_has_build", False) else "0")
+                + " events="
+                + str(getattr(es_proc, "_es_events", "-") if es_proc is not None else "-"),
                 file=sys.stderr,
             )
             return False
-        if seen_eslogger or seen_polling:
-            path_name = "eslogger" if seen_eslogger else "polling"
+        if seen_eslogger_json or seen_eslogger_raw or seen_polling:
+            if seen_eslogger_json:
+                path_name = "eslogger json"
+            elif seen_eslogger_raw:
+                path_name = "eslogger raw"
+            else:
+                path_name = "polling"
             print(
                 "PASS: process watcher "
                 + path_name
@@ -414,16 +533,24 @@ def self_check_short(lib, ignore_pids, require_eslogger):
 
 
 def kill_proc(proc):
-    if proc is None or proc.poll() is not None:
+    if proc is None:
         return
-    proc.terminate()
-    try:
-        proc.wait(timeout=3)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+    fd = getattr(proc, "_es_fd", None)
+    close_fd = getattr(proc, "stdout", None) is proc
+    if proc.poll() is None:
+        proc.terminate()
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
+            proc.kill()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+    if close_fd and fd is not None:
+        try:
+            os.close(fd)
+        except OSError:
             pass
 
 

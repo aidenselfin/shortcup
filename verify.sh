@@ -123,6 +123,13 @@ else
   while IFS= read -r line; do note "  $line"; done < build/verify/launch-guard-test.txt
   fail=$((fail + 1))
 fi
+if /usr/bin/python3 scripts/test-keychain-prompt.py > build/verify/keychain-prompt-test.txt 2>&1; then
+  note "$(/bin/cat build/verify/keychain-prompt-test.txt)"
+else
+  note "FAIL: keychain prompt cases"
+  while IFS= read -r line; do note "  $line"; done < build/verify/keychain-prompt-test.txt
+  fail=$((fail + 1))
+fi
 # Command-line stubs outside build/. No app is started.
 if /usr/bin/python3 scripts/test-stop-launched.py > build/verify/stop-test.txt 2>&1; then
   note "$(/usr/bin/tail -n 1 build/verify/stop-test.txt)"

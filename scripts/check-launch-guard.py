@@ -57,6 +57,7 @@ RUNNERS = {
         "scripts/watch-processes.py",
         "scripts/vtool-minos.py",
         "scripts/run-deadline.py",
+        "scripts/test-keychain-prompt.py",
     },
 }
 REJECTED = {
@@ -657,6 +658,15 @@ def in_live_then(command, live_range):
     return begin <= command.pos < end
 
 
+def git_override_flag(word):
+    stripped = word.strip("\"'")
+    if stripped == "-c" or (stripped.startswith("-c") and not stripped.startswith("--")):
+        return True
+    if stripped == "--config" or stripped.startswith("--config"):
+        return True
+    return False
+
+
 def check_command(command, functions, *, require_abs=False, live_range=None, depth=0):
     words = command.words
     if not words:
@@ -670,7 +680,7 @@ def check_command(command, functions, *, require_abs=False, live_range=None, dep
     if base != "unset":
         for word in list(getattr(command, "assigns", [])) + words:
             name = word.split("=", 1)[0].strip("\"'")
-            if name.upper().startswith("GIT_CONFIG_"):
+            if name.upper() == "GIT_CONFIG" or name.upper().startswith("GIT_CONFIG_"):
                 return [where + " GIT_CONFIG_"]
             if word.startswith("RIPGREP_CONFIG_PATH="):
                 return [where + " RIPGREP_CONFIG_PATH"]
@@ -724,8 +734,7 @@ def check_command(command, functions, *, require_abs=False, live_range=None, dep
                     return [where + " rg --pre"]
         if base == "git":
             for word in words[1:]:
-                stripped = word.strip("\"'")
-                if stripped in ("-c", "--config") or stripped.startswith("-c") or stripped.startswith("--config"):
+                if git_override_flag(word):
                     return [where + " git -c"]
         return []
     if require_abs and base in TOOL_BASES and not bare.startswith("/") and bare != "./build/checks":
@@ -839,6 +848,8 @@ def check_workflow(text):
         problems.append("verify.yml does not run verify.sh with zsh -f")
     if "branches: [main]" not in text and "branches:\n      - main" not in text:
         problems.append("verify.yml push trigger is not limited to main")
+    if re.search(r"pcre2-10\.\d", text) or "sourceforge.net" in text:
+        problems.append("verify.yml still builds pcre2 from source")
     return problems
 
 
