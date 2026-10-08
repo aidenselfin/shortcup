@@ -30,6 +30,8 @@ final class ClickListener {
     private var candidate: (Hint, CGPoint)?
     private var paused = false
     private(set) var eventCount = 0
+    private var menuCache: [String: (key: WindowMenuCacheKey, commands: [String: MenuCommand])] = [:]
+    private var menuTitleTable: [String: [String: String]]?
     var running: Bool { tap != nil }
 
     func setPaused(_ value: Bool) { queue.async { self.paused = value; self.candidate = nil } }
@@ -127,7 +129,7 @@ final class ClickListener {
         // Resolved on mouseDown from the clicked app's menu. No window title or AXValue.
         if let windowMatch {
             guard !roles.contains("AXWebArea") else { return nil }
-            return windowHint(app: app, appID: appID, name: name, role: windowMatch.role, subrole: windowMatch.subrole)
+            return windowHint(app: app, runningApp: runningApp, appID: appID, name: name, role: windowMatch.role, subrole: windowMatch.subrole)
         }
         // Web content can reuse browser labels. Never match a control inside AXWebArea.
         guard !roles.contains("AXWebArea") else { return nil }
@@ -153,16 +155,129 @@ final class ClickListener {
     }
 
     // mouseDown resolves the menu item. mouseUp only confirms the pointer did not drag away.
-    private func windowHint(app: AXUIElement, appID: String, name: String, role: String, subrole: String) -> Hint? {
-        guard let groups = windowButtonMenuGroups(role: role, subrole: subrole),
-              let query = windowButtonQuery(role: role, subrole: subrole) else { return nil }
-        let commands = menuCommands(app, aliases: query.preferred + query.fallback, groups: Set(groups))
-        guard let command = resolveWindowButton(commands, role: role, subrole: subrole), let shortcut = command.shortcut else {
+    private func windowHint(app: AXUIElement, runningApp: NSRunningApplication, appID: String, name: String, role: String, subrole: String) -> Hint? {
+        guard windowButtonQuery(role: role, subrole: subrole) != nil else { return nil }
+        guard let command = cachedWindowCommand(appElement: app, runningApp: runningApp, subrole: subrole),
+              let shortcut = command.shortcut else {
             probe("\(appID): \(subrole) / 메뉴 단축키 없음")
             return nil
         }
         probe("\(appID): \(subrole) / \(command.title)=\(shortcut)")
         return Hint(appID: appID, appName: name, title: command.title, shortcut: shortcut, source: "window")
+    }
+
+    private func cachedWindowCommand(appElement: AXUIElement, runningApp: NSRunningApplication, subrole: String) -> MenuCommand? {
+        let key = windowMenuCacheKey(runningApp)
+        if let entry = menuCache[key.bundleID], entry.key == key { return entry.commands[subrole] }
+        let scan = windowMenuCandidates(appElement)
+        guard scan.complete else { return resolvedWindowCommands(scan.items, language: key.language)[subrole] }
+        let resolved = resolvedWindowCommands(scan.items, language: key.language)
+        menuCache[key.bundleID] = (key, resolved)
+        return resolved[subrole]
+    }
+
+    private func resolvedWindowCommands(_ items: [WindowMenuCandidate], language: String) -> [String: MenuCommand] {
+        let table = menuCommandsTable()
+        var resolved: [String: MenuCommand] = [:]
+        for subrole in ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"] {
+            let extra = localizedWindowTitles(table, language: language, subrole: subrole)
+            guard let item = resolveWindowButton(candidates: items, role: "AXButton", subrole: subrole, extraTitles: extra),
+                  let shortcut = presentedWindowShortcut(item.shortcut, subrole: subrole) else { continue }
+            resolved[subrole] = MenuCommand(title: item.title, shortcut: shortcut, enabled: item.enabled)
+        }
+        return resolved
+    }
+
+    func dumpWindowMenus(of runningApp: NSRunningApplication) -> String {
+        let key = windowMenuCacheKey(runningApp)
+        let app = AXUIElementCreateApplication(runningApp.processIdentifier)
+        AXUIElementSetMessagingTimeout(app, 0.12)
+        let scan = windowMenuCandidates(app)
+        let rows = scan.items.filter(isWindowMenuDumpCandidate)
+        var lines = ["app=\(key.bundleID) version=\(key.version) language=\(key.language) complete=\(scan.complete)"]
+        lines.append("identifier\tshortcut\tsubrole\ttitle\tenabled")
+        for item in rows {
+            let subrole = subroleForMenuIdentifier(item.identifier) ?? "-"
+            lines.append("\(item.identifier)\t\(item.shortcut ?? "-")\t\(subrole)\t\(item.title)\t\(item.enabled)")
+        }
+        lines.append(contentsOf: windowMenuFindings(scan.items))
+        return lines.joined(separator: "\n")
+    }
+
+    private func windowMenuCacheKey(_ runningApp: NSRunningApplication) -> WindowMenuCacheKey {
+        let bundleID = runningApp.bundleIdentifier ?? ""
+        var version = ""
+        var bundle: Bundle?
+        if let url = runningApp.bundleURL {
+            bundle = Bundle(url: url)
+            let short = bundle?.infoDictionary?["CFBundleShortVersionString"] as? String ?? ""
+            let build = bundle?.infoDictionary?["CFBundleVersion"] as? String ?? ""
+            version = short + "+" + build
+        }
+        return WindowMenuCacheKey(bundleID: bundleID, version: version, language: interfaceLanguage(bundleID: bundleID, bundle: bundle))
+    }
+
+    private func interfaceLanguage(bundleID: String, bundle: Bundle?) -> String {
+        let apple = UserDefaults.standard.persistentDomain(forName: bundleID)?["AppleLanguages"] as? [String] ?? []
+        if let bundle, !apple.isEmpty,
+           let match = Bundle.preferredLocalizations(from: bundle.localizations, forPreferences: apple).first {
+            return match
+        }
+        return bundle?.preferredLocalizations.first ?? Locale.preferredLanguages.first ?? "en"
+    }
+
+    private func menuCommandsTable() -> [String: [String: String]] {
+        if let menuTitleTable { return menuTitleTable }
+        let paths = [
+            "/System/Library/Frameworks/AppKit.framework/Resources/MenuCommands.loctable",
+            "/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/MenuCommands.loctable"
+        ]
+        var table: [String: [String: String]] = [:]
+        for path in paths {
+            guard let data = FileManager.default.contents(atPath: path),
+                  let root = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else { continue }
+            for (locale, value) in root {
+                guard let column = value as? [String: Any] else { continue }
+                var strings: [String: String] = [:]
+                for (key, item) in column { if let text = item as? String { strings[key] = text } }
+                table[locale] = strings
+            }
+            break
+        }
+        menuTitleTable = table
+        return table
+    }
+
+    // Two menu levels, plus the menu container between them. No window titles and no AXValue.
+    private func windowMenuCandidates(_ app: AXUIElement) -> (items: [WindowMenuCandidate], complete: Bool) {
+        guard let menu = axElement(app, kAXMenuBarAttribute) else { return ([], false) }
+        AXUIElementSetMessagingTimeout(menu, 0.12)
+        var items: [WindowMenuCandidate] = []
+        var count = 0
+        var complete = true
+        let deadline = Date().addingTimeInterval(1.2)
+        func walk(_ element: AXUIElement, depth: Int) {
+            if count > 800 || Date() >= deadline { complete = false; return }
+            count += 1
+            AXUIElementSetMessagingTimeout(element, 0.12)
+            let role = axString(element, kAXRoleAttribute)
+            if role == kAXMenuItemRole {
+                let identifier = axString(element, kAXIdentifierAttribute)
+                let title = axString(element, kAXTitleAttribute)
+                let draft = WindowMenuCandidate(identifier: identifier, title: title, shortcut: nil, enabled: true)
+                if isWindowMenuDumpCandidate(draft) {
+                    items.append(WindowMenuCandidate(
+                        identifier: identifier, title: title, shortcut: axShortcut(element),
+                        enabled: axValue(element, kAXEnabledAttribute) as? Bool == true))
+                }
+            }
+            let next = (role == kAXMenuItemRole || role == kAXMenuBarItemRole) ? depth + 1 : depth
+            if next <= 2 {
+                for child in axChildren(element) { walk(child, depth: next) }
+            }
+        }
+        walk(menu, depth: 0)
+        return (items, complete)
     }
 
     private func probe(_ message: String) { DispatchQueue.main.async { self.onProbe?(message) } }
@@ -226,6 +341,11 @@ final class AppController: NSObject, NSApplicationDelegate {
     var validationPaused: Bool { paused }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--dump-window-menu-ids") {
+            dumpWindowMenuIDs()
+            NSApp.terminate(nil)
+            exit(0)
+        }
         NSApp.setActivationPolicy(validation ? .regular : .accessory)
         createPanel()
         createMenu()
@@ -252,6 +372,47 @@ final class AppController: NSObject, NSApplicationDelegate {
                 await ValidationRunner(controller: self, folder: self.validationFolder).run()
             }
         }
+    }
+
+    private func dumpWindowMenuIDs() {
+        guard AXIsProcessTrusted() else {
+            let path = Bundle.main.bundleURL.path
+            print("trusted=false path=\(path)")
+            print("손쉬운 사용 권한이 없습니다. 시스템 설정에서 이 앱을 허용한 뒤 다시 실행하세요.")
+            fflush(stdout)
+            exit(1)
+        }
+        let bundleID = dumpBundleID()
+        let running: NSRunningApplication?
+        if let bundleID {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            running = apps.first { $0.isActive } ?? apps.first
+            if running == nil {
+                print("running=false bundle=\(bundleID)")
+                fflush(stdout)
+                exit(1)
+            }
+        } else {
+            let front = NSWorkspace.shared.frontmostApplication
+            if front?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+                print("frontmost=self")
+                print("번들 ID를 인자로 주세요. 예: --dump-window-menu-ids com.apple.Safari")
+                fflush(stdout)
+                exit(1)
+            }
+            running = front
+        }
+        guard let running else { print("running=false"); fflush(stdout); exit(1) }
+        print(listener.dumpWindowMenus(of: running))
+        fflush(stdout)
+    }
+
+    private func dumpBundleID() -> String? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: "--dump-window-menu-ids") else { return nil }
+        let next = args.index(after: index)
+        guard next < args.endIndex, !args[next].hasPrefix("-") else { return nil }
+        return args[next]
     }
 
     func applicationWillTerminate(_ notification: Notification) {

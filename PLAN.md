@@ -49,13 +49,10 @@
 
 ## 창 버튼
 
-메뉴가 아닌 첫 동작. 클릭 down에서 role/subrole만 읽고, 같은 앱의 파일·윈도우 메뉴에서 대응하는 항목의 단축키를 기존 메뉴 읽기로 가져온다. 드래그가 아닌 up에서 보여 준다. 단축키는 고정하지 않는다. 항목이 없거나, 단축키가 없거나, 후보가 둘 이상이면 힌트를 만들지 않는다.
+메뉴가 아닌 첫 동작. 클릭 down에서 role/subrole만 읽고, 같은 앱 메뉴에서 단축키를 가져온다. 드래그가 아닌 up에서 보여 준다. 앞 단계에서 단축키가 하나로 정해지면 거기서 멈춘다. 없거나 서로 다르면 다음으로 넘어간다.
 
-| 버튼 | subrole | 찾을 메뉴 항목 (영어·한국어) |
-|---|---|---|
-| 닫기 | AXCloseButton | Close Window, 윈도우 닫기, 창 닫기. 없을 때만 Close, 닫기 |
-| 최소화 | AXMinimizeButton | Minimize, Minimise, 최소화 |
-| 전체 화면 | AXFullScreenButton | Enter/Exit Full Screen, 전체 화면 시작/종료, 전체화면 열기/종료 |
-| 확대/축소 | AXZoomButton | Zoom, 확대/축소 |
+1. 메뉴를 두 단계까지 보고 `AXIdentifier`가 정확히 같은 항목. 닫기 `performClose:`, 최소화 `performMiniaturize:` 또는 `_performMiniaturize:`, 전체 화면 `toggleFullScreen:` 또는 `toggleFullScreenMode:`, 확대/축소 `performZoom:` 또는 `_performZoom:`. 같은 식별자에 단축키가 둘이면 그 단계에서는 고르지 않는다.
+2. 앱 UI 언어의 AppKit `MenuCommands.loctable` 번역, 그다음 영어·한국어 제목.
+3. 그래도 없으면 힌트 없음.
 
-탭 닫기(⌘W)는 빨간 버튼과 연결하지 않는다. 메뉴·도구 막대 경로는 그대로다. Dock 전환과 볼륨은 포함하지 않는다.
+단축키 문자열로 항목을 추정하지 않는다. 탭 닫기(⌘W)는 빨간 버튼과 연결하지 않는다. 결과는 앱 번들 ID, 버전, UI 언어가 바뀔 때까지 캐시한다. 메뉴·도구 막대 경로는 그대로다. Dock 전환과 볼륨은 포함하지 않는다.

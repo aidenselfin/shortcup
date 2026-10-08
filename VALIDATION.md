@@ -73,11 +73,27 @@
 
 `zsh build.sh`의 순수 함수 검사. 단축키 문자열은 메뉴 항목에서 온 값을 포맷한 결과다.
 
-- ⇧+⌘+W 포맷은 `⇧⌘ W`.
-- Safari형 메뉴(탭 닫기 ⌘W, 윈도우 닫기 ⇧⌘W, 모든 윈도우 닫기 ⌥⌘W)에서 빨간 버튼은 윈도우 닫기만 고른다.
-- Chrome형 메뉴(Close Tab / 탭 닫기 ⌘W, Close Window / 창 닫기 ⇧⌘W)도 ⇧⌘W만 고른다.
-- 윈도우 닫기에 단축키가 없으면 탭 닫기나 닫기로 대체하지 않는다.
-- 윈도우 닫기 항목 자체가 없을 때만 닫기(⌘W)를 쓴다.
-- 최소화는 모두 최소화와 구분한다. 전체 화면 후보의 단축키가 서로 다르면 힌트 없음. 확대/축소에 단축키가 없으면 힌트 없음.
+- ⇧+⌘+W 포맷은 `⇧⌘ W`. ⌘ 없는 F는 전체 화면 항목에서만 `🌐F`로 보여 준다. 이 Mac에서 메뉴가 실제로 그렇게 주는지는 아래 덤프로 확인한다.
+- 식별자 `performClose:`가 창 닫기에만 있으면 그 단축키를 쓴다. 탭 닫기가 `commandDispatch:`이면 빨강 버튼은 창 닫기다.
+- 같은 `performClose:`에 단축키가 둘이면 식별자로는 고르지 않고 제목으로 넘어간다. 제목도 서로 다르면 힌트 없음. 단축키로 추정하지 않는다.
+- 식별자가 비어 있으면 영어·한국어 제목, 또는 loctable 번역으로 찾는다.
+- `_performMiniaturize:`와 `toggleFullScreenMode:`도 해당 버튼에 연결된다.
 
-제목 표는 이 Mac에 설치된 Finder·Safari 메뉴 문자열과 Chrome ko/en 로케일에서 확인했다. 실제 클릭으로 subrole과 메뉴 단축키가 연결되는지는 v0.1의 62개 검사에 포함되지 않는다. 접근성 권한이 있는 현재 빌드로 Finder·Safari·Chrome, 그리고 Electron 앱을 수동 확인해야 한다.
+실제 클릭으로 힌트가 뜨는지는 v0.1의 62개 검사에 포함되지 않는다.
+
+### 메뉴 식별자 덤프
+
+창 제목과 글자 내용(AXValue)은 출력하지 않는다. 메뉴 항목 제목은 탭 닫기와 윈도우 닫기를 구분하려고만 출력한다. 손쉬운 사용 권한이 이 빌드에 있어야 한다.
+
+```sh
+# 앱이 실행 중이어야 한다. 번들 ID를 생략하면 현재 앞 앱을 본다.
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.finder
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.Safari
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.google.Chrome
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.microsoft.VSCode
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.MobileSMS
+```
+
+볼 것: `performClose:`가 탭 닫기에도 붙는지(collision=true), 최소화 식별자가 `_performMiniaturize:`인지, 전체 화면이 shortcut `F`로 나오는지(fullscreen-bare-f).
+
+2026-10-08에 이 워크스페이스 빌드로 Finder 덤프를 시도했다. `trusted=false`로 끝났고 메뉴는 읽지 못했다. 그래서 Safari의 탭 닫기가 `performClose:`인지, macOS 26 최소화가 `_performMiniaturize:`인지, 전체 화면이 ⌘ 없는 F인지는 아직 확인하지 못했다. `🌐F` 표시는 그 AX 값(⌘ 없음 + F)을 가정한 것이고, 실제 메뉴가 그 값을 주는지는 미검증이다. Finder·Chrome은 실행 중이었다. Safari·VS Code·메시지(MobileSMS)는 설치되어 있다.
