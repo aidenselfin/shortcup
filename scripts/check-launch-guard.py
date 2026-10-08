@@ -58,6 +58,7 @@ RUNNERS = {
         "scripts/vtool-minos.py",
         "scripts/run-deadline.py",
         "scripts/test-keychain-prompt.py",
+        "scripts/test-signing-log-hygiene.py",
     },
 }
 REJECTED = {

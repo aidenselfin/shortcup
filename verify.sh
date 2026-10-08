@@ -48,6 +48,12 @@ sign_ok=0
 lines=()
 start=$SECONDS
 note() { lines+=("$1"); print -- "$1"; }
+note_signing_setup() {
+  [[ -s build/verify/signing-setup.log ]] || return 0
+  /usr/bin/grep -E '^(pty bytes=|identity=|partition-ids=|partition-list=|grant-access=|import-p12=)' build/verify/signing-setup.log | while IFS= read -r line; do
+    note "  $line"
+  done
+}
 # Output and logs show ~ and . instead of real absolute paths.
 show() {
   local p="$1"
@@ -128,6 +134,13 @@ if /usr/bin/python3 scripts/test-keychain-prompt.py > build/verify/keychain-prom
 else
   note "FAIL: keychain prompt cases"
   while IFS= read -r line; do note "  $line"; done < build/verify/keychain-prompt-test.txt
+  fail=$((fail + 1))
+fi
+if /usr/bin/python3 scripts/test-signing-log-hygiene.py > build/verify/signing-log-hygiene.txt 2>&1; then
+  note "$(/bin/cat build/verify/signing-log-hygiene.txt)"
+else
+  note "FAIL: signing log hygiene"
+  while IFS= read -r line; do note "  $line"; done < build/verify/signing-log-hygiene.txt
   fail=$((fail + 1))
 fi
 # Command-line stubs outside build/. No app is started.
@@ -218,9 +231,7 @@ fi
 note ""
 note "LAYER 1 signing"
 if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -- /bin/zsh -f setup-dev-signing.sh; then
-  if [[ -s build/verify/signing-setup.log ]]; then
-    /usr/bin/grep -E 'partition-ids=|partition-list=|dump-lines=|dump: |grant-access=|pty |identity=' build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
-  fi
+  note_signing_setup
   if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/dev-build.log -- /bin/zsh -f build.sh --dev; then
     if /usr/bin/python3 scripts/check-dev-bundle.py --running "$DEV_APP"; then
       note "FAIL: Shortcup Dev build is already running. This script will not quit it or sign over it."
@@ -252,9 +263,7 @@ if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -
       if [[ -s build/verify/codesign-sign.log ]]; then
         /usr/bin/tail -n 40 build/verify/codesign-sign.log | while IFS= read -r line; do note "  $line"; done
       fi
-      if [[ -s build/verify/signing-setup.log ]]; then
-        /usr/bin/grep -E 'partition-ids=|partition-list=|pty ' build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
-      fi
+      note_signing_setup
       fail=$((fail + 1))
     fi
   else
@@ -266,9 +275,14 @@ if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -
   fi
 else
   note "FAIL: signing identity was not created"
-  if [[ -s build/verify/signing-setup.log ]]; then
-    /usr/bin/tail -n 80 build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
-  fi
+  note_signing_setup
+  fail=$((fail + 1))
+fi
+if /usr/bin/python3 scripts/test-signing-log-hygiene.py > build/verify/signing-log-hygiene-after.txt 2>&1; then
+  note "$(/bin/cat build/verify/signing-log-hygiene-after.txt)"
+else
+  note "FAIL: signing log hygiene after LAYER 1"
+  while IFS= read -r line; do note "  $line"; done < build/verify/signing-log-hygiene-after.txt
   fail=$((fail + 1))
 fi
 

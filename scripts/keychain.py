@@ -12,6 +12,7 @@ import pty
 import re
 import select
 import stat
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -183,12 +184,17 @@ def deny_ui():
 
 
 def grant_codesign_access(item, password):
-    """Allow codesign to use the key without a GUI prompt.
+    """Allow /usr/bin/codesign and /usr/bin/security to use the key.
 
-    A NULL path is the Security API equivalent of `security import -A`.
+    SecTrustedApplicationCreateFromPath(NULL) trusts the calling process
+    (python3 on this path), not every application. That is not
+    `security import -A`. A NULL path is never passed. Opening the key to
+    every app is not done here; if it were ever required it would be a
+    deliberate `security import -A` only when GITHUB_ACTIONS is set, never
+    on a local Mac, with this ACL risk kept in the comment.
     """
     trusted = []
-    for path in (None, b"/usr/bin/codesign", b"/usr/bin/security"):
+    for path in (b"/usr/bin/codesign", b"/usr/bin/security"):
         app = ctypes.c_void_p()
         status = Security.SecTrustedApplicationCreateFromPath(path, ctypes.byref(app))
         if status == 0 and app.value:
@@ -404,18 +410,6 @@ def clean_pty_text(buf):
     return bytes(ch for ch in text if ch >= 32 or ch in (9, 10, 13))
 
 
-def prompt_shape(buf, keychain_path):
-    """Redact paths for diagnostics. Never used as a matcher."""
-    text = clean_pty_text(buf)
-    path = keychain_path.encode() if isinstance(keychain_path, str) else keychain_path
-    home = os.path.expanduser("~").encode()
-    text = text.replace(path, b"%s")
-    text = text.replace(os.path.basename(path), b"%s")
-    text = text.replace(home, b"~")
-    text = re.sub(br"/Users/[^/\n]+", b"~", text)
-    return text.decode("ascii", "replace")[:400]
-
-
 def match_security_prompt(line, keychain_path):
     """Return the allow-listed template name, or None.
 
@@ -505,8 +499,8 @@ def set_partition_list_security(keychain_path, password):
     after a C-locale prompt that equals an allow-listed security(1) string
     (trailing whitespace stripped, must end with ':', optional
     '(deprecated) ' prefix). Raw pty bytes are never logged. Diagnostics
-    report byte count, whether a prompt matched and which template, and
-    the child exit status.
+    are one line of counts and yes/no flags: byte count, prompt matched,
+    password sent, and child exit status.
     """
     argv = [
         "/usr/bin/security",
@@ -524,8 +518,6 @@ def set_partition_list_security(keychain_path, password):
         os._exit(127)
     sent = False
     prompt = b""
-    after = b""
-    preamble = ""
     prompt_match = None
     bytes_got = 0
     child_status = None
@@ -544,28 +536,17 @@ def set_partition_list_security(keychain_path, password):
         return str(_child_exit_code(child_status))
 
     def log_pty():
-        extra = ""
-        if not prompt_match:
-            extra = " shape=" + prompt_shape(prompt, keychain_path)
-        else:
-            if preamble:
-                extra += " preamble=" + preamble
-            if after:
-                extra += " after=" + prompt_shape(after, keychain_path)
-        print(
+        line = (
             "pty bytes="
             + str(bytes_got)
             + " prompt="
             + ("yes" if prompt_match else "no")
-            + " match="
-            + (prompt_match or "-")
             + " sent="
             + ("1" if sent else "0")
             + " status="
-            + status_text()
-            + extra,
-            file=sys.stderr,
+            + status_text().replace("\n", "").replace("\r", "")
         )
+        print(line, file=sys.stderr)
 
     def reap(hang=False):
         nonlocal child_status
@@ -604,12 +585,9 @@ def set_partition_list_security(keychain_path, password):
                     prompt += chunk
                     prompt_match = prompt_ready(prompt)
                     if prompt_match:
-                        preamble = prompt_shape(prompt, keychain_path)
                         os.write(fd, password + b"\n")
                         sent = True
                         prompt = b""
-                else:
-                    after += chunk
             if reap():
                 break
         if child_status is None:
@@ -718,19 +696,49 @@ def import_p12(keychain_path, keychain_password_file, p12_path, p12_password_fil
     print("import-p12=ok")
 
 
+def partition_list_status(dump_text):
+    """ok only when dump-keychain -a shows apple-tool: and apple: as separate ids.
+
+    apple: is not counted as a substring of apple-tool:. The dump text is
+    never printed; callers emit a count and ok/unverified only.
+    """
+    lower = dump_text.lower()
+    has_tool = "apple-tool:" in lower
+    has_apple = "apple:" in lower.replace("apple-tool:", "")
+    if has_tool and has_apple:
+        return "ok"
+    return "unverified"
+
+
+def report_partition_list(keychain_path):
+    """Print only partition-ids=N and partition-list=ok|unverified. Never the dump."""
+    try:
+        proc = subprocess.run(
+            ["/usr/bin/security", "dump-keychain", "-a", keychain_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        text = proc.stdout.decode("utf-8", "replace")
+    except OSError:
+        print("partition-ids=0")
+        print("partition-list=unverified")
+        return
+    print("partition-ids=" + str(len(re.findall(r"partition", text, re.I))))
+    print("partition-list=" + partition_list_status(text))
+
+
 def set_partition_list(keychain_path, password_file):
     password = password_bytes(password_file)
     try:
         set_partition_list_api(keychain_path, password)
-        print("partition-list=ok")
-        return
     except KeyboardInterrupt:
         raise
     except BaseException as exc:
         print("ERROR: Security API partition list failed: " + str(exc), file=sys.stderr)
-    set_partition_list_security(keychain_path, password)
-    grant_identities_codesign(keychain_path, password)
-    print("partition-list=ok")
+        set_partition_list_security(keychain_path, password)
+        grant_identities_codesign(keychain_path, password)
+    report_partition_list(keychain_path)
 
 
 def main():

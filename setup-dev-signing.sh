@@ -8,7 +8,7 @@ CONF_DIR="${HOME}/.config/shortcup"
 PW_FILE="${CONF_DIR}/keychain-password"
 KEYCHAIN="${HOME}/Library/Keychains/shortcup-dev.keychain-db"
 MARKER="${CONF_DIR}/dev-identity-version"
-VERSION=5
+VERSION=6
 /bin/mkdir -p "$CONF_DIR"
 /bin/chmod 700 "$CONF_DIR"
 
@@ -95,7 +95,7 @@ keyUsage=critical,digitalSignature
 extendedKeyUsage=critical,codeSigning
 EOF
   if ! /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$work/cs.cnf" -extensions ext \
-    -keyout "$work/key.pem" -out "$work/cert.pem" >/dev/null; then
+    -keyout "$work/key.pem" -out "$work/cert.pem" >/dev/null 2>&1; then
     print -- "ERROR: could not create the dedicated signing certificate" >&2
     exit 1
   fi
@@ -118,7 +118,7 @@ EOF
   /bin/chmod 600 "$work/p12pass"
   if ! /usr/bin/openssl pkcs12 -export -inkey "$work/key.pem" -in "$work/cert.pem" -out "$work/dev.p12" \
     -keypbe PBE-SHA1-3DES -certpbe PBE-SHA1-3DES -macalg sha1 \
-    -passout "file:$work/p12pass" >/dev/null; then
+    -passout "file:$work/p12pass" >/dev/null 2>&1; then
     print -- "ERROR: could not wrap the dedicated signing identity" >&2
     exit 1
   fi
@@ -131,14 +131,6 @@ EOF
     print -- "ERROR: could not set the dedicated keychain partition list" >&2
     /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN" || true
     exit 1
-  fi
-  dump="$(/usr/bin/security dump-keychain "$KEYCHAIN" 2>/dev/null || true)"
-  print -- "dump-lines=$(print -r -- "$dump" | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
-  print -r -- "$dump" | /usr/bin/grep -E 'class:|labl:|type:|atyp:' | while IFS= read -r line; do print -- "dump: $line"; done
-  parts="$(print -r -- "$dump" | /usr/bin/grep -ci partition || true)"
-  print -- "partition-ids=${parts:-0}"
-  if [[ "${parts:-0}" == "0" ]]; then
-    print -- "NOTE: dump-keychain has no partitionID; relying on trusted-app ACL"
   fi
   /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN"
   /bin/rm -rf "$work"
@@ -170,4 +162,4 @@ ensure_private_mode
 
 print -- "identity=Shortcup Dev"
 print -- "keychain=~/Library/Keychains/${KEYCHAIN:t}"
-/usr/bin/security find-identity -p codesigning "$KEYCHAIN"
+/usr/bin/security find-identity -p codesigning "$KEYCHAIN" >/dev/null 2>&1
