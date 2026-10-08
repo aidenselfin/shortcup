@@ -173,20 +173,24 @@ def sample_hits(lib, ignore_pids, verify_pid):
     return hits
 
 
-def paths_in(obj):
+def exec_paths(obj):
+    """Yield executable.path values from an eslogger event, not argv or cwd."""
     if isinstance(obj, dict):
-        for key, value in obj.items():
-            if isinstance(value, str) and (
-                key in ("path", "executable_path", "executable") or value.startswith("/")
-            ):
-                yield value
-            else:
-                yield from paths_in(value)
+        executable = obj.get("executable")
+        if isinstance(executable, dict):
+            path = executable.get("path")
+            if isinstance(path, str) and path.startswith("/"):
+                yield path
+        elif isinstance(executable, str) and executable.startswith("/"):
+            yield executable
+        path = obj.get("executable_path")
+        if isinstance(path, str) and path.startswith("/"):
+            yield path
+        for value in obj.values():
+            yield from exec_paths(value)
     elif isinstance(obj, list):
         for item in obj:
-            yield from paths_in(item)
-    elif isinstance(obj, str) and obj.startswith("/"):
-        yield obj
+            yield from exec_paths(item)
 
 
 def eslogger_wanted():
@@ -371,7 +375,7 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
             break
         index = end
         proc._es_json = getattr(proc, "_es_json", 0) + 1
-        for raw in paths_in(data):
+        for raw in exec_paths(data):
             try:
                 path = Path(os.path.realpath(raw))
             except OSError:
