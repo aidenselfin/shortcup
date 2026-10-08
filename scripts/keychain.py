@@ -410,7 +410,7 @@ def prompt_shape(buf, keychain_path):
     text = text.replace(os.path.basename(path), b"%s")
     text = text.replace(home, b"~")
     text = re.sub(br"/Users/[^/\n]+", b"~", text)
-    return text.decode("ascii", "replace")[:120]
+    return text.decode("ascii", "replace")[:400]
 
 
 def match_security_prompt(line, keychain_path):
@@ -520,6 +520,7 @@ def set_partition_list_security(keychain_path, password):
     sent = False
     prompt = b""
     after = b""
+    preamble = ""
     prompt_match = None
     bytes_got = 0
     child_status = None
@@ -541,8 +542,11 @@ def set_partition_list_security(keychain_path, password):
         extra = ""
         if not prompt_match:
             extra = " shape=" + prompt_shape(prompt, keychain_path)
-        elif after:
-            extra = " after=" + prompt_shape(after, keychain_path)
+        else:
+            if preamble:
+                extra += " preamble=" + preamble
+            if after:
+                extra += " after=" + prompt_shape(after, keychain_path)
         print(
             "pty bytes="
             + str(bytes_got)
@@ -595,6 +599,7 @@ def set_partition_list_security(keychain_path, password):
                     prompt += chunk
                     prompt_match = prompt_ready(prompt)
                     if prompt_match:
+                        preamble = prompt_shape(prompt, keychain_path)
                         os.write(fd, password + b"\n")
                         sent = True
                         prompt = b""
