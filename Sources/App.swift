@@ -20,6 +20,18 @@ func axShortcut(_ element: AXUIElement) -> String? {
                  modifiers: (axValue(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue)
 }
 
+func axWindowShortcut(_ element: AXUIElement) -> String? {
+    windowShortcutText(character: axString(element, kAXMenuItemCmdCharAttribute),
+                       virtualKey: (axValue(element, kAXMenuItemCmdVirtualKeyAttribute) as? NSNumber)?.intValue,
+                       glyph: (axValue(element, kAXMenuItemCmdGlyphAttribute) as? NSNumber)?.intValue,
+                       modifiers: (axValue(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue)
+}
+
+func armAXTimeout() {
+    let system = AXUIElementCreateSystemWide()
+    AXUIElementSetMessagingTimeout(system, 0.12)
+}
+
 final class ClickListener {
     var onHint: ((Hint) -> Void)?
     var onStatus: ((String) -> Void)?
@@ -30,6 +42,8 @@ final class ClickListener {
     private var candidate: (Hint, CGPoint)?
     private var paused = false
     private(set) var eventCount = 0
+    private var menuCache: [pid_t: WindowMenuCacheEntry] = [:]
+    private var menuTitleTable: [String: [String: String]]?
     var running: Bool { tap != nil }
 
     func setPaused(_ value: Bool) { queue.async { self.paused = value; self.candidate = nil } }
@@ -89,30 +103,54 @@ final class ClickListener {
               let runningApp = NSRunningApplication(processIdentifier: hitPID) else { return nil }
         let appID = runningApp.bundleIdentifier ?? ""
         let name = runningApp.localizedName ?? "앱"
-        probe("\(appID): \(axString(hit, kAXRoleAttribute))")
+        // The hit element does not inherit the system-wide timeout. A stuck target must not hang us.
+        AXUIElementSetMessagingTimeout(hit, 0.12)
+        let hitRole = axString(hit, kAXRoleAttribute)
+        let hitSubrole = axString(hit, kAXSubroleAttribute)
         let app = AXUIElementCreateApplication(hitPID)
         AXUIElementSetMessagingTimeout(app, 0.12)
 
         var node: AXUIElement? = hit
         var ancestors: [AXUIElement] = []
+        var roles: [String] = []
+        var window: AXUIElement?
+        var trafficSubrole = false
         for _ in 0..<12 {
             guard let current = node else { break }
+            AXUIElementSetMessagingTimeout(current, 0.12)
             ancestors.append(current)
             let role = axString(current, kAXRoleAttribute)
+            roles.append(role)
+            if role == kAXButtonRole, windowButtonQuery(role: role, subrole: axString(current, kAXSubroleAttribute)) != nil {
+                trafficSubrole = true
+            }
             if role == kAXMenuItemRole {
                 guard (axValue(current, kAXEnabledAttribute) as? Bool) == true else { return nil }
                 let title = axString(current, kAXTitleAttribute)
                 guard !title.isEmpty, axChildren(current).isEmpty else { return nil }
+                probe("\(appID): \(hitRole)\(hitSubrole.isEmpty ? "" : " / \(hitSubrole)")")
                 return Hint(appID: appID, appName: name, title: title, shortcut: axShortcut(current), source: "menu")
             }
+            if role == kAXWindowRole { window = current; break }
             node = axElement(current, kAXParentAttribute)
         }
+        if let window, !roles.contains("AXWebArea") {
+            AXUIElementSetMessagingTimeout(window, 0.12)
+            let priors = ancestors.filter { !CFEqual($0, window) }
+            let matched = ownedTrafficLight(window, clicked: priors)
+            if let matched {
+                return windowHint(pid: hitPID, bundleID: appID, name: name, subrole: matched)
+            }
+            // A tab or sheet close button shares the subrole and is not this window's button.
+            if trafficSubrole { return nil }
+        }
         // Web content can reuse browser labels. Never match a control inside AXWebArea.
-        guard !ancestors.contains(where: { axString($0, kAXRoleAttribute) == "AXWebArea" }) else { return nil }
+        guard !roles.contains("AXWebArea") else { return nil }
         let inToolbar = ancestors.contains(where: { axString($0, kAXRoleAttribute) == kAXToolbarRole })
         let chromeTabButton = appID == "com.google.Chrome" && ancestors.contains(where: { axString($0, kAXRoleAttribute) == kAXWindowRole }) &&
             axString(hit, kAXRoleAttribute) == kAXButtonRole && ["new tab", "새 탭"].contains(normalized(axString(hit, kAXTitleAttribute)))
         guard inToolbar || chromeTabButton else { return nil }
+        probe("\(appID): \(hitRole)\(hitSubrole.isEmpty ? "" : " / \(hitSubrole)")")
         for element in ancestors {
             let role = axString(element, kAXRoleAttribute)
             if (axValue(element, kAXEnabledAttribute) as? Bool) == false { continue }
@@ -130,13 +168,179 @@ final class ClickListener {
         return nil
     }
 
+    func prescan(_ app: NSRunningApplication) {
+        let pid = app.processIdentifier
+        let bundleID = app.bundleIdentifier ?? ""
+        guard AXIsProcessTrusted(), pid != ProcessInfo.processInfo.processIdentifier else { return }
+        queue.async { self.refreshWindowMenus(pid: pid, bundleID: bundleID) }
+    }
+
+    // The click only reads the pid cache. The menu walk runs on activation, or once if that cache is missing.
+    private func windowHint(pid: pid_t, bundleID: String, name: String, subrole: String) -> Hint? {
+        refreshWindowMenus(pid: pid, bundleID: bundleID)
+        guard let shortcut = menuCache[pid]?.shortcuts[subrole] else { return nil }
+        return Hint(appID: bundleID, appName: name, title: windowButtonLabel(subrole: subrole), shortcut: shortcut, source: "window")
+    }
+
+    private func ownedTrafficLight(_ window: AXUIElement, clicked: [AXUIElement]) -> String? {
+        let subrole = axString(window, kAXSubroleAttribute)
+        guard subrole == "AXStandardWindow" else { return nil }
+        func owns(_ attribute: String) -> Bool {
+            guard let button = axElement(window, attribute) else { return false }
+            return clicked.contains { CFEqual($0, button) }
+        }
+        return standardWindowButtonSubrole(windowSubrole: subrole, ownsClose: owns(kAXCloseButtonAttribute),
+                                           ownsMinimize: owns(kAXMinimizeButtonAttribute),
+                                           ownsFullScreen: owns(kAXFullScreenButtonAttribute),
+                                           ownsZoom: owns(kAXZoomButtonAttribute))
+    }
+
+    private func refreshWindowMenus(pid: pid_t, bundleID: String, now: Date = Date()) {
+        guard shouldRescanWindowMenu(entry: menuCache[pid], now: now) else { return }
+        let attempts = (menuCache[pid]?.attempts ?? 0) + 1
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.12)
+        let identified = windowMenuCandidates(app, titleAllowlist: [])
+        guard identified.complete else {
+            menuCache[pid] = WindowMenuCacheEntry(shortcuts: shortcuts(from: identified.items, language: "en"), complete: false, attempts: attempts, scannedAt: now)
+            return
+        }
+        let language = preferredInterfaceLanguage(appleLanguages: appAppleLanguages(bundleID), fallback: Locale.preferredLanguages)
+        let needs = subrolesNeedingTitleScan(identified.items)
+        var items = identified.items
+        var complete = true
+        if !needs.isEmpty {
+            let extras = needs.flatMap { localizedWindowTitles(menuCommandsTable(), language: language, subrole: $0) }
+            let allowlist = windowTitleAllowlist(subroles: Set(needs), extras: extras)
+            let titled = windowMenuCandidates(app, titleAllowlist: allowlist)
+            complete = titled.complete
+            items.append(contentsOf: titled.items)
+        }
+        menuCache[pid] = WindowMenuCacheEntry(shortcuts: shortcuts(from: items, language: language), complete: complete, attempts: attempts, scannedAt: now)
+    }
+
+    private func shortcuts(from items: [WindowMenuCandidate], language: String) -> [String: String] {
+        let table = menuCommandsTable()
+        var resolved: [String: String] = [:]
+        for subrole in ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"] {
+            switch windowSubroleLookup(items, subrole: subrole) {
+            case .shortcut(let shortcut):
+                resolved[subrole] = shortcut
+            case .noShortcut:
+                break
+            case .needsTitle:
+                let extra = localizedWindowTitles(table, language: language, subrole: subrole)
+                if let item = resolveWindowButton(candidates: items, role: "AXButton", subrole: subrole, extraTitles: extra),
+                   let shortcut = presentedWindowShortcut(item.shortcut, subrole: subrole) {
+                    resolved[subrole] = shortcut
+                }
+            }
+        }
+        return resolved
+    }
+
+    func dumpWindowMenus(of runningApp: NSRunningApplication) -> String {
+        armAXTimeout()
+        let pid = runningApp.processIdentifier
+        let bundleID = runningApp.bundleIdentifier ?? ""
+        let language = preferredInterfaceLanguage(appleLanguages: appAppleLanguages(bundleID), fallback: Locale.preferredLanguages)
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, 0.12)
+        let scan = windowMenuCandidates(app, titleAllowlist: [], everyIdentifier: true)
+        var lines = ["app=\(bundleID) pid=\(pid) language=\(language) complete=\(scan.complete)"]
+        lines.append("identifier\tshortcut\tsubrole")
+        for item in scan.items where !item.identifier.isEmpty {
+            let subrole = subroleForMenuIdentifier(item.identifier) ?? "-"
+            lines.append("\(item.identifier)\t\(item.shortcut ?? "-")\t\(subrole)")
+        }
+        lines.append("identifier-miss=\(subrolesNeedingTitleScan(scan.items).joined(separator: ","))")
+        lines.append(contentsOf: windowMenuFindings(scan.items))
+        return lines.joined(separator: "\n")
+    }
+
+    private func appAppleLanguages(_ bundleID: String) -> [String] {
+        guard !bundleID.isEmpty, let value = CFPreferencesCopyAppValue("AppleLanguages" as CFString, bundleID as CFString) else { return [] }
+        return value as? [String] ?? []
+    }
+
+    private func menuCommandsTable() -> [String: [String: String]] {
+        if let menuTitleTable { return menuTitleTable }
+        let paths = [
+            "/System/Library/Frameworks/AppKit.framework/Resources/MenuCommands.loctable",
+            "/System/Library/Frameworks/AppKit.framework/Versions/C/Resources/MenuCommands.loctable"
+        ]
+        var table: [String: [String: String]] = [:]
+        for path in paths {
+            guard let data = FileManager.default.contents(atPath: path),
+                  let root = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else { continue }
+            for (locale, value) in root {
+                guard let column = value as? [String: Any] else { continue }
+                var strings: [String: String] = [:]
+                for (key, item) in column { if let text = item as? String { strings[key] = text } }
+                table[locale] = strings
+            }
+            break
+        }
+        menuTitleTable = table
+        return table
+    }
+
+    // File, Window, and View only. Titles of matching items are read only when the identifier is empty and a shortcut is present.
+    // Submenu headers are read only to skip history, bookmarks, and recent lists. No window titles or AXValue.
+    private func windowMenuCandidates(_ app: AXUIElement, titleAllowlist: Set<String>, everyIdentifier: Bool = false) -> (items: [WindowMenuCandidate], complete: Bool) {
+        armAXTimeout()
+        guard let menu = axElement(app, kAXMenuBarAttribute) else { return ([], false) }
+        AXUIElementSetMessagingTimeout(menu, 0.12)
+        var items: [WindowMenuCandidate] = []
+        var count = 0
+        var complete = true
+        let deadline = Date().addingTimeInterval(1.2)
+        func walk(_ element: AXUIElement, depth: Int) {
+            if count >= 800 || Date() >= deadline { complete = false; return }
+            count += 1
+            AXUIElementSetMessagingTimeout(element, 0.12)
+            let role = axString(element, kAXRoleAttribute)
+            if role == kAXMenuBarItemRole {
+                guard isWindowCommandMenu(axString(element, kAXTitleAttribute)) else { return }
+                for child in axChildren(element) where complete { walk(child, depth: depth + 1) }
+                return
+            }
+            if role == kAXMenuItemRole {
+                let identifier = axString(element, kAXIdentifierAttribute)
+                let known = subroleForMenuIdentifier(identifier) != nil
+                if known || (everyIdentifier && !identifier.isEmpty) {
+                    items.append(WindowMenuCandidate(identifier: identifier, title: "", shortcut: axWindowShortcut(element), enabled: true))
+                } else if !titleAllowlist.isEmpty && shouldReadWindowMenuTitle(identifier: identifier, hasShortcut: true) {
+                    if let shortcut = axWindowShortcut(element) {
+                        let title = axString(element, kAXTitleAttribute)
+                        if titleAllowlist.contains(normalized(title)) {
+                            items.append(WindowMenuCandidate(identifier: "", title: title, shortcut: shortcut, enabled: true))
+                        }
+                    }
+                }
+                let children = axChildren(element)
+                if !children.isEmpty && depth < 2 && complete {
+                    let skip = identifier.isEmpty && isDynamicMenuList(axString(element, kAXTitleAttribute))
+                    if !skip { for child in children { walk(child, depth: depth + 1) } }
+                }
+                return
+            }
+            if depth <= 2 {
+                for child in axChildren(element) where complete { walk(child, depth: depth) }
+            }
+        }
+        for child in axChildren(menu) where complete { walk(child, depth: 0) }
+        return (items, complete)
+    }
+
     private func probe(_ message: String) { DispatchQueue.main.async { self.onProbe?(message) } }
 
-    private func menuCommands(_ app: AXUIElement, aliases: [String]) -> [MenuCommand] {
+    private func menuCommands(_ app: AXUIElement, aliases: [String], groups: Set<String>? = nil) -> [MenuCommand] {
         guard let menu = axElement(app, kAXMenuBarAttribute) else { return [] }
+        AXUIElementSetMessagingTimeout(menu, 0.12)
         var commands: [MenuCommand] = []
-        let groups = Set(["file", "파일", "edit", "편집", "수정", "view", "보기", "history", "방문 기록"])
-        var pending = axChildren(menu).filter { groups.contains(normalized(axString($0, kAXTitleAttribute))) }.map { ($0, 0) }
+        let menuGroups = groups ?? Set(["file", "파일", "edit", "편집", "수정", "view", "보기", "history", "방문 기록"])
+        var pending = axChildren(menu).filter { menuGroups.contains(normalized(axString($0, kAXTitleAttribute))) }.map { ($0, 0) }
         let names = Set(aliases.map(normalized))
         let deadline = Date().addingTimeInterval(1.2)
         var count = 0
@@ -144,6 +348,7 @@ final class ClickListener {
         while count < pending.count, count < 700, Date() < deadline {
             let (item, depth) = pending[count]
             count += 1
+            AXUIElementSetMessagingTimeout(item, 0.12)
             let title = axString(item, kAXTitleAttribute)
             if names.contains(normalized(title)), axString(item, kAXRoleAttribute) == kAXMenuItemRole {
                 commands.append(MenuCommand(title: title, shortcut: axShortcut(item), enabled: axValue(item, kAXEnabledAttribute) as? Bool == true))
@@ -189,6 +394,11 @@ final class AppController: NSObject, NSApplicationDelegate {
     var validationPaused: Bool { paused }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if CommandLine.arguments.contains("--dump-window-menu-ids") {
+            dumpWindowMenuIDs()
+            NSApp.terminate(nil)
+            exit(0)
+        }
         NSApp.setActivationPolicy(validation ? .regular : .accessory)
         createPanel()
         createMenu()
@@ -215,6 +425,47 @@ final class AppController: NSObject, NSApplicationDelegate {
                 await ValidationRunner(controller: self, folder: self.validationFolder).run()
             }
         }
+    }
+
+    private func dumpWindowMenuIDs() {
+        guard AXIsProcessTrusted() else {
+            let path = Bundle.main.bundleURL.path
+            print("trusted=false path=\(path)")
+            print("손쉬운 사용 권한이 없습니다. 시스템 설정에서 이 앱을 허용한 뒤 다시 실행하세요.")
+            fflush(stdout)
+            exit(1)
+        }
+        let bundleID = dumpBundleID()
+        let running: NSRunningApplication?
+        if let bundleID {
+            let apps = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID)
+            running = apps.first { $0.isActive } ?? apps.first
+            if running == nil {
+                print("running=false bundle=\(bundleID)")
+                fflush(stdout)
+                exit(1)
+            }
+        } else {
+            let front = NSWorkspace.shared.frontmostApplication
+            if front?.processIdentifier == ProcessInfo.processInfo.processIdentifier {
+                print("frontmost=self")
+                print("번들 ID를 인자로 주세요. 예: --dump-window-menu-ids com.apple.Safari")
+                fflush(stdout)
+                exit(1)
+            }
+            running = front
+        }
+        guard let running else { print("running=false"); fflush(stdout); exit(1) }
+        print(listener.dumpWindowMenus(of: running))
+        fflush(stdout)
+    }
+
+    private func dumpBundleID() -> String? {
+        let args = CommandLine.arguments
+        guard let index = args.firstIndex(of: "--dump-window-menu-ids") else { return nil }
+        let next = args.index(after: index)
+        guard next < args.endIndex, !args[next].hasPrefix("-") else { return nil }
+        return args[next]
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -276,8 +527,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             let hints = history.recent(for: activeID)
             if hints.isEmpty {
                 stack.addArrangedSubview(label("클릭을 단축키로", size: 15, weight: .semibold))
-                stack.addArrangedSubview(label("메뉴에서 작업을 선택해 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
-                stack.addArrangedSubview(label("Safari · Chrome · Finder\n브라우저 도구 막대 일부 지원", size: 12, color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("메뉴나 창 버튼을 눌러 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("Safari · Chrome · Finder\n창 버튼 · 브라우저 도구 막대 일부", size: 12, color: .secondaryLabelColor))
             }
             for hint in hints {
                 let row = NSStackView()
@@ -285,7 +536,8 @@ final class AppController: NSObject, NSApplicationDelegate {
                 row.addArrangedSubview(label(hint.title, size: 13, weight: .medium))
                 row.addArrangedSubview(label(hint.shortcut ?? "단축키 미지정", size: hint.shortcut == nil ? 13 : 22,
                                             weight: .semibold, color: hint.shortcut == nil ? .secondaryLabelColor : .labelColor))
-                row.addArrangedSubview(label(hint.source == "menu" ? "메뉴에서 확인" : "도구 막대 → 메뉴", size: 10, color: .secondaryLabelColor))
+                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : "도구 막대 → 메뉴")
+                row.addArrangedSubview(label(caption, size: 10, color: .secondaryLabelColor))
                 stack.addArrangedSubview(row)
             }
         }
@@ -326,23 +578,27 @@ final class AppController: NSObject, NSApplicationDelegate {
     private func checkPermission() {
         let now = AXIsProcessTrusted()
         if now != trusted || panel.contentView == nil {
+            let gained = now && !trusted
             trusted = now
             if now { monitorError = nil; listener.start() } else { listener.stop() }
+            if gained, let app = NSWorkspace.shared.frontmostApplication { listener.prescan(app) }
             render()
         }
         if logURL != nil {
             let state: [String: Any] = ["trusted": trusted, "listening": listener.running, "visible": panel.isVisible,
                                         "hidden": hidden, "events": listener.eventCount, "activeApp": activeID, "probe": validationProbe,
-                                        "hints": history.recent(for: activeID).map { ["title": $0.title, "shortcut": $0.shortcut ?? "", "source": $0.source] }]
+                                        "hints": history.recent(for: activeID).filter { $0.source != "window" }.map {
+                                            ["title": $0.title, "shortcut": $0.shortcut ?? "", "source": $0.source]
+                                        }]
             if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys, .prettyPrinted]) {
                 try? data.write(to: validationFolder.appendingPathComponent("validation-state.json"), options: .atomic)
             }
         }
     }
     private func updateActive() {
-        if let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != ProcessInfo.processInfo.processIdentifier {
-            activeID = app.bundleIdentifier ?? ""; activeName = app.localizedName ?? "앱"
-        }
+        guard let app = NSWorkspace.shared.frontmostApplication, app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+        activeID = app.bundleIdentifier ?? ""; activeName = app.localizedName ?? "앱"
+        listener.prescan(app)
     }
     @objc private func activated(_ notification: Notification) { updateActive(); render() }
     @objc private func screenChanged(_ notification: Notification) { positionPanel() }
@@ -358,7 +614,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
     }
     private func record(_ hint: Hint) {
-        guard let logURL else { return }
+        guard hint.source != "window", let logURL else { return }
         let object: [String: String] = ["app": hint.appID, "title": hint.title, "shortcut": hint.shortcut ?? "", "source": hint.source]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
         do {

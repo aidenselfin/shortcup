@@ -68,3 +68,36 @@
 이 버전은 단축키 학습을 돕는 앱이다. 새 단축키를 만들어 모든 마우스 작업을 대체하지 않는다. 웹 내부 작업, 드래그 대체, 그리기/타임라인, OS 제스처는 계획대로 제외했다. 다른 앱·언어·macOS 버전, 물리 트랙패드 입력, 다중 모니터·전체 화면은 실제 검증하지 않았다. 현재 빌드는 이 Mac의 SDK 기본 배포 대상으로 만들어져 macOS 26 이상이 필요하다. 이전 macOS와 Intel 배포는 별도 빌드·검증이 필요하다.
 
 개발용 ad-hoc 서명이라 재빌드하면 접근성 권한을 다시 등록해야 할 수 있다. Developer ID 서명·공증과 배포 설치 프로그램은 만들지 않았다. 메뉴 접근성 정보나 앱 UI 라벨이 바뀌면 해당 연결을 다시 검증해야 한다. 일반 실행은 클릭을 관찰하며 키 입력 기록·화면 녹화·외부 전송을 하지 않는다. 검증용 진단 기록은 최종 확인 후 비활성화했다.
+
+## 창 버튼 매핑
+
+`zsh build.sh`의 순수 함수 검사. 단축키 문자열은 메뉴 항목에서 온 값을 포맷한 결과다.
+
+- 표준 창의 버튼 참조와 클릭 요소가 같을 때만 힌트를 낸다. 탭·시트의 닫기 버튼은 제외한다.
+- ⇧+⌘+W 포맷은 `⇧⌘ W`. 전체 화면 식별자에 ⌘가 있는 단축키와 ⌘ 없는 F가 같이 있으면 ⌘가 있는 쪽만 보여 준다. ⌘ 없는 F만 있으면 힌트 없음. `🌐F`는 쓰지 않는다.
+- 식별자가 있고 단축키가 없으면(Chrome의 `performZoom:`) 제목으로 다시 찾지 않는다.
+- 식별자가 없으면 파일·윈도우·보기 메뉴의 제목으로 찾는다. Finder가 이 경우다.
+- 창 버튼 경로는 `validation-events.jsonl`과 `validation-state.json`에 힌트와 프로브를 쓰지 않는다.
+- 글리프 99(Caps Lock)와 103(Help)는 힌트가 없다. Home은 102, End는 105다. 가상 키 0은 없는 값으로 본다.
+
+실제 클릭으로 힌트가 뜨는지는 v0.1의 62개 검사에 포함되지 않는다. 이 워크스페이스에서는 아직 트래픽 라이트 클릭을 확인하지 못했다.
+
+### 메뉴 식별자 덤프
+
+터미널에만 찍는다. 파일로 저장하지 않는다. 열은 식별자, 단축키, 대응하는 subrole이다. 메뉴 제목, 창 제목, 버튼 이름, 글자 내용은 출력하지 않는다. 손쉬운 사용 권한이 이 빌드에 있어야 한다.
+
+```sh
+# 앱이 실행 중이어야 한다. 번들 ID를 생략하면 현재 앞 앱을 본다.
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.finder
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.Safari
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.google.Chrome
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.microsoft.VSCode
+build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.MobileSMS
+```
+
+Juhyeon의 Mac(macOS 26.6.2) 덤프:
+
+- Chrome 154: `performClose:`는 ⇧⌘W 하나(충돌 없음). `performMiniaturize:`는 ⌘M. `toggleFullScreen:`은 ⌃⌘F와 ⌘ 없는 F 둘. `performZoom:`는 단축키 없음.
+- Finder: 닫기·최소화·전체 화면 항목에 `AXIdentifier`가 없다. 제목 폴백이 필요하다.
+
+Safari의 탭 닫기가 `performClose:`인지는 이 덤프에 없다. 실제 버튼 클릭은 아직이다. 손쉬운 사용에 이 워크스페이스의 `build/Shortcup.app`을 넣은 뒤, 표준 창의 닫기·최소화·전체 화면을 눌러 패널 힌트를 확인하면 된다. 애드혹 서명이라 다시 빌드하면 권한을 다시 줘야 할 수 있다. `~/shortcup`의 앱과는 다른 경로다.
