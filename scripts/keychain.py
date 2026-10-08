@@ -330,14 +330,35 @@ def _child_exit_code(status):
 # prompt_password() prints "password to unlock %s: " or "password: ".
 # set-keychain-password prints "Old Password: ", "New Password: ",
 # and "Retype New Password: ".
+# A pty may prefix CSI such as ESC[?1034h; that is stripped before matching.
 SECURITY_PROMPT_EXACT = (
     b"password:",
     b"password to unlock keychain:",
+    b"password to unlock default:",
     b"old password:",
     b"new password:",
     b"retype new password:",
     b"enter password:",
 )
+CSI = re.compile(br"\x1b\[[?\d;]*[A-Za-z]|\x1b[@-Z\\-_]|\x1b\][^\x07]*\x07|\[\?[0-9]+[hl]")
+
+
+def clean_pty_text(buf):
+    text = buf.replace(b"\r", b"\n")
+    text = CSI.sub(b"", text)
+    return bytes(ch for ch in text if ch >= 32 or ch in (9, 10, 13))
+
+
+def prompt_shape(buf, keychain_path):
+    """Redact paths for diagnostics. Never used as a matcher."""
+    text = clean_pty_text(buf)
+    path = keychain_path.encode() if isinstance(keychain_path, str) else keychain_path
+    home = os.path.expanduser("~").encode()
+    text = text.replace(path, b"%s")
+    text = text.replace(os.path.basename(path), b"%s")
+    text = text.replace(home, b"~")
+    text = re.sub(br"/Users/[^/\n]+", b"~", text)
+    return text.decode("ascii", "replace")[:120]
 
 
 def match_security_prompt(line, keychain_path):
@@ -347,7 +368,7 @@ def match_security_prompt(line, keychain_path):
     one of the C-locale security(1) prompts. The keychain path is substituted
     into the '%s' forms internally and never returned.
     """
-    stripped = line.replace(b"\r", b"").rstrip()
+    stripped = clean_pty_text(line).replace(b"\n", b"").rstrip()
     if not stripped.endswith(b":"):
         return None
     lower = stripped.lower()
@@ -355,15 +376,28 @@ def match_security_prompt(line, keychain_path):
         if lower == exact:
             return exact.decode("ascii")
     path = keychain_path.encode() if isinstance(keychain_path, str) else keychain_path
-    base = os.path.basename(path)
-    named = (
-        ("password to unlock %s:", b"password to unlock " + path + b":"),
-        ("password to unlock %s:", b"password to unlock " + base + b":"),
-        ("password for %s:", b"password for " + path + b":"),
-        ("password for %s:", b"password for " + base + b":"),
-        ('password for "%s":', b'password for "' + path + b'":'),
-        ('password for "%s":', b'password for "' + base + b'":'),
-    )
+    names = [path, os.path.basename(path)]
+    try:
+        real = os.path.realpath(path)
+        if isinstance(real, str):
+            real = real.encode()
+        names.append(real)
+        names.append(os.path.basename(real))
+    except OSError:
+        pass
+    seen = set()
+    named = []
+    for item in names:
+        if item in seen:
+            continue
+        seen.add(item)
+        named.extend(
+            (
+                ("password to unlock %s:", b"password to unlock " + item + b":"),
+                ("password for %s:", b"password for " + item + b":"),
+                ('password for "%s":', b'password for "' + item + b'":'),
+            )
+        )
     for name, expected in named:
         if lower == expected.lower():
             return name
@@ -404,10 +438,7 @@ def set_partition_list_security(keychain_path, password):
     deadline = time.monotonic() + 20
 
     def prompt_ready(buf):
-        text = buf.replace(b"\r", b"\n")
-        text = re.sub(br"\x1b\[[0-9;]*[A-Za-z]", b"", text)
-        text = bytes(ch for ch in text if ch >= 32 or ch in (9, 10, 13))
-        for line in text.split(b"\n"):
+        for line in clean_pty_text(buf).split(b"\n"):
             name = match_security_prompt(line, keychain_path)
             if name:
                 return name
@@ -419,6 +450,9 @@ def set_partition_list_security(keychain_path, password):
         return str(_child_exit_code(child_status))
 
     def log_pty():
+        extra = ""
+        if not prompt_match:
+            extra = " shape=" + prompt_shape(prompt, keychain_path)
         print(
             "pty bytes="
             + str(bytes_got)
@@ -429,7 +463,8 @@ def set_partition_list_security(keychain_path, password):
             + " sent="
             + ("1" if sent else "0")
             + " status="
-            + status_text(),
+            + status_text()
+            + extra,
             file=sys.stderr,
         )
 
