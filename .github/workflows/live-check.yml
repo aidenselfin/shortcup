@@ -13,8 +13,12 @@ on:
       - "Sources/**"
       - "Fixture/**"
       - "verify.sh"
-      - ".github/workflows/live-check.yml"
+      - "build.sh"
+      - "Tests.swift"
+      - "Info.plist"
+      - "scripts/check-selftest-json.py"
       - "scripts/ax-trust-probe.swift"
+      - ".github/workflows/live-check.yml"
   workflow_dispatch:
 
 permissions:
@@ -35,7 +39,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (node24)
         timeout-minutes: 2
         with:
           persist-credentials: false
@@ -143,7 +147,8 @@ jobs:
             echo "CRITICAL: result JSON is unexpectedly large (${bytes} bytes)"
             exit 1
           fi
-          echo "canary_scan=pass"
+          # Live launch is off, so there is no app canary to hunt. Do not call this a pass.
+          echo "canary_scan=not_applicable"
           echo "result_json_bytes=${bytes}"
           python3 -c 'import json; d=json.load(open("build/verify/selftest.json")); print("report_trusted=" + ("true" if d["trusted"] else "false")); print("report_result=" + str(d["result"])); print("report_cases=" + str(len(d["cases"]))); [print("report_case=" + str(i) + " result=" + str(c.get("result"))) for i, c in enumerate(d["cases"])]'
           echo "result_json_begin"
@@ -164,7 +169,7 @@ jobs:
 
       - name: Upload result JSON
         timeout-minutes: 2
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (node24)
         with:
           name: selftest-result
           path: build/verify/selftest.json
@@ -180,20 +185,50 @@ jobs:
           set +e
           root="${GITHUB_WORKSPACE}/build/"
           echo "kill_root=${root}"
-          ps -ax -o pid=,command= | while IFS= read -r line; do
-            [[ -z "${line//[[:space:]]/}" ]] && continue
-            trimmed="${line#"${line%%[![:space:]]*}"}"
-            pid="${trimmed%% *}"
-            command="${trimmed#"$pid"}"
-            command="${command#"${command%%[![:space:]]*}"}"
-            case "$pid" in
-              ''|*[!0-9]*) continue ;;
-            esac
-            case "$command" in
-              "$root"*)
-                echo "killing pid=${pid}"
-                kill "$pid" 2>/dev/null || true
-                ;;
-            esac
-          done
-          exit 0
+          pids_file="$(mktemp)"
+          collect() {
+            : > "$pids_file"
+            ps -ax -o pid=,command= | while IFS= read -r line; do
+              [[ -z "${line//[[:space:]]/}" ]] && continue
+              trimmed="${line#"${line%%[![:space:]]*}"}"
+              pid="${trimmed%% *}"
+              command="${trimmed#"$pid"}"
+              command="${command#"${command%%[![:space:]]*}"}"
+              case "$pid" in
+                ''|*[!0-9]*) continue ;;
+              esac
+              case "$command" in
+                "$root"*) printf '%s\n' "$pid" >> "$pids_file" ;;
+              esac
+            done
+          }
+          collect
+          sigterm_sent=0
+          while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            echo "sigterm pid=${pid}"
+            kill -TERM "$pid" 2>/dev/null || true
+            sigterm_sent=$((sigterm_sent + 1))
+          done < "$pids_file"
+          echo "sigterm_sent=${sigterm_sent}"
+          sleep 1
+          collect
+          sigkill_sent=0
+          while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            echo "sigkill pid=${pid}"
+            kill -9 "$pid" 2>/dev/null || true
+            sigkill_sent=$((sigkill_sent + 1))
+          done < "$pids_file"
+          echo "sigkill_sent=${sigkill_sent}"
+          sleep 1
+          collect
+          remaining=0
+          while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            echo "still_running pid=${pid}"
+            remaining=$((remaining + 1))
+          done < "$pids_file"
+          rm -f "$pids_file"
+          echo "remaining=${remaining}"
+          [[ "$remaining" == 0 ]]
