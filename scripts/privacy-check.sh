@@ -661,15 +661,19 @@ SKIP_MAP = {
 def read_source_line(scanned_file, rel, lineno, commit):
     body = b""
     if commit:
+        # History and range: the commit blob only. A missing blob is unmarked
+        # (fail-closed). Never fall back to the scanned path or the worktree;
+        # a working-tree marker must not hide a finding from an older commit.
         proc = subprocess.run(
             ["git", "-C", repo, "cat-file", "blob", f"{commit}:{rel}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
         )
-        if proc.returncode == 0:
-            body = proc.stdout
-    if not body:
+        if proc.returncode != 0:
+            return ""
+        body = proc.stdout
+    else:
         for candidate in (scanned_file, os.path.join(strip, rel) if strip else ""):
             if candidate and os.path.isfile(candidate):
                 with open(candidate, "rb") as handle:
@@ -705,9 +709,10 @@ for item in data:
     elif repo and rel.startswith(repo.rstrip("/") + "/"):
         rel = rel[len(repo.rstrip("/")) + 1 :]
     if rel in fixtures and marker:
-        source = read_source_line(
-            scanned, rel, line, str(item.get("Commit") or "").strip()
-        )
+        commit = str(item.get("Commit") or "").strip()
+        if not commit:
+            commit = os.environ.get("GITLEAKS_FILTER_COMMIT", "").strip()
+        source = read_source_line(scanned, rel, line, commit)
         if marker in source:
             skip = skip_rule(source)
             if rule in SKIP_MAP.get(skip, set()):
@@ -880,7 +885,8 @@ load_media_allowlist() {
         exit 2
         ;;
     esac
-    if [[ ! "$sha" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+    sha=$(printf '%s' "$sha" | tr '[:upper:]' '[:lower:]')
+    if [[ ! "$sha" =~ ^[0-9a-f]{40,64}$ ]]; then
       echo "invalid-allowlist" >&2
       exit 2
     fi
@@ -919,7 +925,7 @@ warn_media() {
 }
 
 scan_added_media() {
-  local commit file blob
+  local commit file blob seen="" key
   load_media_allowlist
   if [[ "$history" -eq 1 ]]; then
     git rev-list "${rev_args[@]}" > "$work/media-commits"
@@ -930,6 +936,11 @@ scan_added_media() {
         [[ -n "$file" ]] || continue
         is_media "$file" || continue
         blob=$(media_blob "$commit" "$file")
+        key="$file $blob"
+        case $'\n'"$seen" in
+          *$'\n'"$key"$'\n'*) continue ;;
+        esac
+        seen+="$key"$'\n'
         if media_allowed "$file" "$blob"; then
           warn_media "$file"
         else
@@ -942,6 +953,11 @@ scan_added_media() {
       [[ -n "$file" ]] || continue
       is_media "$file" || continue
       blob=$(media_blob "$scan_rev" "$file")
+      key="$file $blob"
+      case $'\n'"$seen" in
+        *$'\n'"$key"$'\n'*) continue ;;
+      esac
+      seen+="$key"$'\n'
       if media_allowed "$file" "$blob"; then
         warn_media "$file"
       else

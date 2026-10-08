@@ -352,6 +352,10 @@ set -e
 expect 0 png-allowlisted-check
 grep -F -q "::warning file=icon.png::" "$tmp/err" || fail missing-allowlisted-warning
 grep -F -q "icon.png" "$summary" || fail missing-allowlisted-summary
+png_sha_upper=$(printf '%s' "$png_sha" | tr '[:lower:]' '[:upper:]')
+printf '%s %s\n' "icon.png" "$png_sha_upper" > "$repo/scripts/privacy-binary-allowlist.txt"
+run --repo "$repo" --range "$png_base" "$png_head"
+expect 0 png-allowlisted-uppercase-sha
 printf '%s\n' "icon.png" > "$repo/scripts/privacy-binary-allowlist.txt"
 run --repo "$repo" --range "$png_base" "$png_head"
 expect_error png-path-only-allowlist
@@ -378,6 +382,60 @@ printf '%s %s\n' "icon.png" "$png_sha" > "$repo/scripts/privacy-binary-allowlist
 run --repo "$repo" --range "$png_mod" "$png_type"
 expect 1 png-typechange-stale-sha
 has icon.png unreviewed-media
+
+# Range: a working-tree-only fixture marker must not hide an older commit.
+repo="$tmp/range-worktree-marker"
+new_repo "$repo"
+mkdir -p "$repo/scripts/privacy-fixtures"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+wt_base=$(git -C "$repo" rev-parse HEAD)
+printf '%s\n' "$fake_path/worktree-unmarked" > "$repo/scripts/privacy-fixtures/fake-user-path.txt"
+git -C "$repo" add scripts/privacy-fixtures/fake-user-path.txt
+git -C "$repo" commit -q -m "unmarked fixture path"
+wt_head=$(git -C "$repo" rev-parse HEAD)
+printf '%s %s\n' "$fake_path/worktree-unmarked" "$marker" > "$repo/scripts/privacy-fixtures/fake-user-path.txt"
+run --repo "$repo" --range "$wt_base" "$wt_head"
+expect 1 range-worktree-marker-check
+has scripts/privacy-fixtures/fake-user-path.txt users-path 1
+run --repo "$repo" --range "$wt_base" "$wt_head" --gitleaks --config "$config"
+expect 1 range-worktree-marker-gitleaks
+has scripts/privacy-fixtures/fake-user-path.txt macos-user-path 1
+
+# Merge commit: -m lists the same added blob vs each parent; report once.
+repo="$tmp/media-dedup"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+dedup_base=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" checkout -q -b side
+printf '%s\n' "side" > "$repo/s.txt"
+commit_all "$repo" "side"
+git -C "$repo" checkout -q main
+printf '%s\n' "main" > "$repo/m.txt"
+commit_all "$repo" "main"
+git -C "$repo" merge -q --no-commit side > /dev/null 2>&1
+printf 'PNG\000not-a-screenshot\n' > "$repo/icon.png"
+git -C "$repo" add -A
+git -C "$repo" commit -q -m "merge with icon"
+dedup_head=$(git -C "$repo" rev-parse HEAD)
+run --repo "$repo" --range "$dedup_base" "$dedup_head"
+expect 1 media-dedup-check
+has icon.png unreviewed-media
+[[ "$(printf '%s\n' "$out" | grep -c '^icon.png:1 unreviewed-media$')" -eq 1 ]] ||
+  fail media-dedup-duplicate-finding
+mkdir -p "$repo/scripts"
+dedup_sha=$(git -C "$repo" rev-parse "$dedup_head:icon.png")
+printf '%s %s\n' "icon.png" "$dedup_sha" > "$repo/scripts/privacy-binary-allowlist.txt"
+summary="$tmp/media-dedup-summary"
+: > "$summary"
+set +e
+out=$(GITHUB_STEP_SUMMARY="$summary" bash "$check" --repo "$repo" --range "$dedup_base" "$dedup_head" 2> "$tmp/err")
+code=$?
+set -e
+expect 0 media-dedup-allowlisted
+[[ "$(grep -c '^::warning file=icon.png::' "$tmp/err")" -eq 1 ]] ||
+  fail media-dedup-duplicate-warning
 
 # 3. Content that exists only in a merge commit, removed afterwards.
 repo="$tmp/merge"
