@@ -37,8 +37,17 @@ sign_ok=0
 lines=()
 typeset -a recorded_pids
 typeset -A recorded_seen
+typeset -a launched_paths
 start=$SECONDS
 note() { lines+=("$1"); print -- "$1"; }
+# Output and logs show ~ and . instead of real absolute paths.
+show() {
+  local p="$1"
+  [[ -n "${TMPDIR:-}" && "$p" == "${TMPDIR%/}"* ]] && p='$TMPDIR'"${p#${TMPDIR%/}}"
+  [[ "$p" == "$ROOT"* ]] && p=".${p#$ROOT}"
+  [[ "$p" == "$HOME"* ]] && p="~${p#$HOME}"
+  print -r -- "$p"
+}
 
 record_pid() {
   local pid="$1"
@@ -48,16 +57,32 @@ record_pid() {
   recorded_pids+=("$pid")
 }
 
+# Stops what this --live run started: processes whose executable is exactly one
+# of launched_paths, plus recorded pids whose executable is still ours or open.
+# SIGTERM, confirm, then SIGKILL. Sets stop_remaining.
+stop_remaining=0
+stop_launched() {
+  stop_remaining=0
+  (( ${#launched_paths[@]} )) || return 0
+  local -a args
+  local pid out
+  for pid in "${recorded_pids[@]}"; do args+=(--recorded "$pid"); done
+  args+=(--opener /usr/bin/open)
+  out="$(python3 scripts/stop-launched.py stop "${args[@]}" "${launched_paths[@]}" 2>&1 || true)"
+  stop_remaining="$(print -r -- "$out" | awk -F= '/^remaining=/ { print $2 }')"
+  [[ "$stop_remaining" == <-> ]] || stop_remaining=1
+  return 0
+}
+
 # SAFE mode returns immediately and kills nothing.
-# --live kills only pids this run recorded, after writing the quit files.
 cleanup() {
   [[ "${live:-0}" == 1 ]] || return 0
   [[ -n "${CONTROL:-}" ]] && mkdir -p "$CONTROL" && : > "$CONTROL/quit"
   [[ -n "${STRUCT_CONTROL:-}" ]] && mkdir -p "$STRUCT_CONTROL" && : > "$STRUCT_CONTROL/quit"
-  local pid
-  for pid in "${recorded_pids[@]}"; do
-    kill "$pid" 2>/dev/null || true
-  done
+  stop_launched
+  if [[ "$stop_remaining" != 0 ]]; then
+    print -- "FAIL: $stop_remaining launched process(es) still running after SIGKILL"
+  fi
   return 0
 }
 trap cleanup EXIT INT TERM
@@ -217,7 +242,7 @@ if zsh setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
       print -- "$requirement" > build/verify/codesign.txt
       if print -- "$requirement" | grep -q 'certificate leaf'; then
         note "PASS: designated requirement has a certificate leaf (signed in build/, not copied to ~/Applications)"
-        note "$requirement"
+        note "$(print -r -- "$requirement" | grep '^designated' || true)"
         sign_ok=1
       else
         note "FAIL: designated requirement has no certificate leaf"
@@ -300,6 +325,16 @@ run_live() {
     fi
     launch_app="$INSTALLED"
   fi
+  local fixture_exe="$ROOT/$FIXTURE/Contents/MacOS/Fixture"
+  local dev_exe="$launch_app/Contents/MacOS/ShortcupDev"
+  local already
+  already="$(python3 scripts/stop-launched.py find "$dev_exe" "$fixture_exe" || true)"
+  if [[ -n "$already" ]]; then
+    note "FAIL: Shortcup Dev or the fixture is already running from the paths this run would launch. Nothing was started."
+    fail=$((fail + 1))
+    return
+  fi
+  launched_paths=("$dev_exe" "$fixture_exe")
   mkdir -p "$CONTROL" "$STRUCT_CONTROL" "${HOME}/.config/shortcup"
   local canary="SCX-$(openssl rand -hex 4)"
   umask 077
@@ -308,7 +343,7 @@ run_live() {
   rm -f "$STRUCT_OUT" "$OUT" "$CONTROL/quit" "$STRUCT_CONTROL/quit" "$CONTROL/shortcup.pid" "$CONTROL/fixture.pid" "$STRUCT_CONTROL/fixture.pid"
   # Both commands exist. launch_method picks one. open always includes -g.
   if [[ "$launch_method" == "direct" ]]; then
-    "$FIXTURE/Contents/MacOS/Fixture" --control "$PWD/$STRUCT_CONTROL" --dump-structure "$PWD/$STRUCT_OUT" &
+    "$ROOT/$FIXTURE/Contents/MacOS/Fixture" --control "$PWD/$STRUCT_CONTROL" --dump-structure "$PWD/$STRUCT_OUT" &
     record_pid "$!"
   else
     open -g -n -W "$FIXTURE" --args --control "$PWD/$STRUCT_CONTROL" --dump-structure "$PWD/$STRUCT_OUT" &
@@ -323,7 +358,18 @@ run_live() {
     sleep 0.2
   done
   : > "$STRUCT_CONTROL/quit"
+  local _wait
+  for _wait in {1..10}; do
+    kill -0 "$struct_opener" 2>/dev/null || break
+    sleep 0.2
+  done
+  stop_launched
   wait "$struct_opener" 2>/dev/null || true
+  if [[ "$stop_remaining" != 0 ]]; then
+    note "FAIL: $stop_remaining fixture process(es) survived SIGKILL after the structure dump"
+    fail=$((fail + 1))
+    return
+  fi
   if [[ -f "$STRUCT_OUT" ]] && python3 scripts/check-fixture-structure.py "$STRUCT_OUT" > build/verify/fixture-structure.txt 2>&1; then
     note "PASS: fixture own-tree has the standard window, panel, and menu identifiers"
     while IFS= read -r line; do note "  $line"; done < build/verify/fixture-structure.txt
@@ -373,12 +419,20 @@ run_live() {
     fail=$((fail + 1))
     : > "$CONTROL/quit"
     : > "$STRUCT_CONTROL/quit"
-    local stuck
-    for stuck in "${recorded_pids[@]}"; do
-      kill "$stuck" 2>/dev/null || true
+    for _wait in {1..10}; do
+      kill -0 "$opener" 2>/dev/null || break
+      sleep 0.2
     done
+  fi
+  # Runs on a hang and on a normal finish. Before the pid files exist, the
+  # exact executable paths still find the dev app and the fixture.
+  stop_launched
+  wait "$opener" 2>/dev/null || true
+  if [[ "$stop_remaining" != 0 ]]; then
+    note "FAIL: $stop_remaining launched process(es) survived SIGKILL"
+    fail=$((fail + 1))
   else
-    wait "$opener" || true
+    note "PASS: no launched dev app or fixture process remains"
   fi
   if [[ "$lsof_connections" -gt 0 ]]; then
     note "CRITICAL: ShortcupDev has a network connection"
@@ -448,14 +502,66 @@ scan_file="$(mktemp)"
 : > "$scan_file"
 scan_failed=0
 scan_blocked=0
+# Only paths Shortcup itself can write. Other apps' containers, preferences,
+# caches, and logs are never read: macOS can show an "access data from other
+# apps" prompt for the terminal, and those files are not ours.
+SHORTCUP_IDS=(com.shortcup.dev com.shortcup.fixture)
+user_cache_dir="$(getconf DARWIN_USER_CACHE_DIR 2>/dev/null || true)"
+user_cache_dir="${user_cache_dir%/}"
+allowed_scan_path() {
+  local p="$1" id
+  case "$p" in
+    build|build/*|"$ROOT/build"|"$ROOT/build/"*) return 0 ;;
+    "$INSTALLED"|"$INSTALLED/"*) return 0 ;;
+  esac
+  for id in "${SHORTCUP_IDS[@]}"; do
+    case "$p" in
+      "$HOME/Library/Containers/$id"|"$HOME/Library/Containers/$id/"*) return 0 ;;
+      "$HOME/Library/Preferences/$id.plist") return 0 ;;
+      "$HOME/Library/Caches/$id"|"$HOME/Library/Caches/$id/"*) return 0 ;;
+      "$HOME/Library/Saved Application State/$id.savedState"|"$HOME/Library/Saved Application State/$id.savedState/"*) return 0 ;;
+    esac
+    if [[ -n "$user_cache_dir" ]]; then
+      case "$p" in "$user_cache_dir/$id"|"$user_cache_dir/$id/"*) return 0 ;; esac
+    fi
+  done
+  local base="${p:t:l}"
+  if [[ "$base" == *shortcup* || "$base" == *fixture* ]]; then
+    [[ -n "${TMPDIR:-}" && "${p:h}" == "${TMPDIR%/}" ]] && return 0
+    [[ "${p:h}" == /tmp || "${p:h}" == /private/tmp ]] && return 0
+  fi
+  return 1
+}
+typeset -a scan_roots
+for id in "${SHORTCUP_IDS[@]}"; do
+  scan_roots+=(
+    "$HOME/Library/Containers/$id"
+    "$HOME/Library/Preferences/$id.plist"
+    "$HOME/Library/Caches/$id"
+    "$HOME/Library/Saved Application State/$id.savedState"
+  )
+  [[ -n "$user_cache_dir" ]] && scan_roots+=("$user_cache_dir/$id")
+done
+add_named_temp_roots() {
+  setopt local_options extended_glob
+  if [[ -n "${TMPDIR:-}" ]]; then
+    scan_roots+=("${TMPDIR%/}"/(#i)*(shortcup|fixture)*(N))
+  fi
+  scan_roots+=(/tmp/(#i)*(shortcup|fixture)*(N))
+}
+add_named_temp_roots
 # needle is an rg -f pattern file so the random canary is never placed on argv.
 # A literal needle is only used for the replay string, which already lives in source.
 scan_tree() {
   local dir="$1" pattern_file="${2:-}" literal="${3:-}" out err rg_status
-  if [[ ! -e "$dir" ]]; then
-    note "canary scan: path missing, not read: $dir"
+  if ! allowed_scan_path "$dir"; then
+    note "FAIL: refused to scan a path outside Shortcup's own data: $(show "$dir")"
+    scan_failed=1
     return 0
   fi
+  [[ -e "$dir" ]] || return 0
+  scanned_count=$((scanned_count + 1))
+  scanned_list+=("$(show "$dir")")
   out="$(mktemp)"
   err="$(mktemp)"
   rg_status=0
@@ -475,28 +581,28 @@ lines = [line for line in open(sys.argv[1], errors="replace") if line.strip()]
 sys.exit(0 if lines and all(any(piece in line for piece in allowed) for line in lines) else 1)
 PY
   then
-    note "canary scan: unreadable or interrupted paths under $dir. Readable files had no match. Those paths are not a pass."
+    note "canary scan: unreadable or interrupted paths under $(show "$dir"). Readable files had no match. Those paths are not a pass."
     scan_blocked=1
   else
-    note "FAIL: canary scan error under $dir (rg status $rg_status)"
+    note "FAIL: canary scan error under $(show "$dir") (rg status $rg_status)"
     scan_failed=1
   fi
   rm -f "$out" "$err"
 }
+scanned_count=0
+typeset -a scanned_list
 # Random canary. The file itself lives in ~/.config and is not scanned.
-scan_tree "build/verify" "$CANARY_FILE"
-scan_tree "build/Shortcup Dev.app" "$CANARY_FILE"
-scan_tree "build/product-link" "$CANARY_FILE"
-scan_tree "$FIXTURE" "$CANARY_FILE"
-if [[ -d "$INSTALLED" ]]; then scan_tree "$INSTALLED" "$CANARY_FILE"; fi
-scan_tree "${HOME}/Library/Application Support" "$CANARY_FILE"
-scan_tree "${HOME}/Library/Caches" "$CANARY_FILE"
-scan_tree "${HOME}/Library/Logs" "$CANARY_FILE"
-scan_tree "${HOME}/Library/Saved Application State" "$CANARY_FILE"
-scan_tree "${HOME}/Library/Preferences" "$CANARY_FILE"
-scan_tree "${HOME}/Library/Containers" "$CANARY_FILE"
-if [[ -n "${TMPDIR:-}" ]]; then scan_tree "$TMPDIR" "$CANARY_FILE"; fi
-scan_tree /tmp "$CANARY_FILE"
+scan_tree "build" "$CANARY_FILE"
+scan_tree "$INSTALLED" "$CANARY_FILE"
+for root in "${scan_roots[@]}"; do
+  scan_tree "$root" "$CANARY_FILE"
+done
+# Self-check of the guard: another app's data must be refused.
+if allowed_scan_path "$HOME/Library/Containers" || allowed_scan_path "$HOME/Library/Preferences" \
+  || allowed_scan_path "$HOME/Library/Caches/com.example.other" || allowed_scan_path "${TMPDIR:-/tmp}"; then
+  note "FAIL: canary scan allow-list accepts another app's data"
+  scan_failed=1
+fi
 # Stable replay canary. Source and build/checks contain the literal, so they are not scanned.
 scan_tree "build/verify" "" "SCX-replay-canary"
 scan_tree "build/Shortcup Dev.app" "" "SCX-replay-canary"
@@ -513,17 +619,19 @@ if [[ -s build/verify/unified.log ]]; then
     scan_failed=1
   fi
 fi
+note "canary scan read $scanned_count Shortcup-owned paths:"
+for root in "${scanned_list[@]}"; do note "  $root"; done
 if [[ -s "$scan_file" ]]; then
   note "CRITICAL: canary text was written to disk or the unified log"
-  while IFS= read -r hit; do note "  hit: $hit"; done < "$scan_file"
+  while IFS= read -r hit; do note "  hit: $(show "$hit")"; done < "$scan_file"
   fail=$((fail + 1))
 elif [[ "$scan_failed" != 0 ]]; then
   note "FAIL: canary scan did not finish cleanly"
   fail=$((fail + 1))
 elif [[ "$scan_blocked" != 0 ]]; then
-  note "PASS: no canary in readable files. Some OS-protected paths could not be read and were not treated as clean."
+  note "PASS: no canary in readable files. Some paths could not be read and were not treated as clean."
 else
-  note "PASS: canary text was not found on disk or in the unified log"
+  note "PASS: canary text was not found in Shortcup's own files or in the unified log"
 fi
 rm -f "$scan_file"
 
