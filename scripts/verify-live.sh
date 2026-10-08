@@ -83,7 +83,7 @@ trap cleanup EXIT INT TERM
 note ""
 note "WARNING: --live will start Shortcup Fixture and Shortcup Dev windows on this screen and send synthetic clicks."
 note "The fixture is an accessory app. Its windows are small, sit in the bottom-right corner, and cannot become key."
-note "Launch method: $launch_method. The development Mac default uses LaunchServices with -g. CI uses --direct-launch or SHORTCUP_LAUNCH=direct."
+note "Launch method: $launch_method. The dev Mac default uses LaunchServices with -g. CI uses --direct-launch or SHORTCUP_LAUNCH=direct."
 note ""
 note "WARNING: starting Shortcup Fixture and Shortcup Dev now. Windows will appear in the bottom-right corner."
 note "LAYER 3 live fixture"

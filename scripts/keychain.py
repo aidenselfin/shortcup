@@ -343,12 +343,22 @@ def set_partition_list_security(keychain_path, password):
     ]
     pid, fd = pty.fork()
     if pid == 0:
+        os.environ["LC_ALL"] = "C"
+        os.environ["LANG"] = "C"
+        os.environ["LC_MESSAGES"] = "C"
         os.execv(argv[0], argv)
         os._exit(127)
     sent = False
     prompt = b""
     child_status = None
     deadline = time.monotonic() + 20
+    prompt_prefixes = (
+        b"password:",
+        b"password ",
+        b"enter password",
+        b"passphrase:",
+        b"pass phrase:",
+    )
 
     def reap(hang=False):
         nonlocal child_status
@@ -383,8 +393,14 @@ def set_partition_list_security(keychain_path, password):
                     time.sleep(0.05)
                     continue
                 if not sent:
-                    prompt += chunk.lower()
-                    if b"password" in prompt:
+                    prompt += chunk.lower().replace(b"\r", b"\n")
+                    ready = False
+                    for line in prompt.split(b"\n"):
+                        stripped = line.strip()
+                        if any(stripped.startswith(prefix) for prefix in prompt_prefixes):
+                            ready = True
+                            break
+                    if ready:
                         os.write(fd, password + b"\n")
                         sent = True
                         prompt = b""

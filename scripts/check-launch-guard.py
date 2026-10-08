@@ -61,6 +61,12 @@ REJECTED = {
     "eval", "source", ".", "osascript", "exec", "command", "builtin", "nohup", "env",
     "xargs", "sudo", "launchctl", "perl", "ruby", "alias", "unalias", "open",
 }
+TRAP_SIGNALS = {
+    "EXIT", "HUP", "INT", "QUIT", "ILL", "TRAP", "ABRT", "BUS", "FPE", "KILL", "USR1",
+    "SEGV", "USR2", "PIPE", "ALRM", "TERM", "CHLD", "CONT", "STOP", "TSTP", "TTIN",
+    "TTOU", "URG", "XCPU", "XFSZ", "VTALRM", "PROF", "WINCH", "IO", "SYS", "ERR",
+    "DEBUG", "ZERR", "INFO",
+}
 PREFIXES = {"if", "elif", "then", "else", "do", "while", "until", "!", "time", "{", "noglob"}
 ASSIGN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\[[^\]]*\])?\+?=")
 PYTHON_LAUNCH = re.compile(r"\bsubprocess\b|\bos\.system\b|\bPopen\b|\bos\.exec|\bNSWorkspace\b|\bopen\s*\(")
@@ -105,7 +111,7 @@ class Tokenizer:
                     self.line += 1
                 self.i += 1
 
-    def read_balanced(self, open_char, close_char):
+    def read_balanced(self, open_char, close_char, nest_subs=False):
         """Read after an opening char up to its match, honoring quotes. Returns inner text."""
         depth = 1
         start = self.i
@@ -122,6 +128,23 @@ class Tokenizer:
                 continue
             if char == '"':
                 self.skip_double_quoted()
+                continue
+            if nest_subs and char == "$" and self.peek(1) == "(":
+                if self.peek(2) == "(":
+                    self.advance(3)
+                    self.read_balanced("(", ")", nest_subs=True)
+                    if self.peek() == ")":
+                        self.advance()
+                    continue
+                line = self.line
+                self.advance(2)
+                self.nested(self.read_balanced("(", ")", nest_subs=True), line)
+                continue
+            if nest_subs and char == "`":
+                line = self.line
+                self.advance()
+                inner = self.read_until("`")
+                self.nested(inner, line)
                 continue
             if char == open_char:
                 depth += 1
@@ -147,7 +170,7 @@ class Tokenizer:
             if char == "$" and self.peek(1) == "(" and self.peek(2) != "(":
                 line = self.line
                 self.advance(2)
-                self.nested(self.read_balanced("(", ")"), line)
+                self.nested(self.read_balanced("(", ")", nest_subs=True), line)
                 continue
             if char == "`":
                 line = self.line
@@ -231,17 +254,17 @@ class Tokenizer:
             if char == "$" and self.peek(1) == "(":
                 if self.peek(2) == "(":
                     self.advance(3)
-                    self.read_balanced("(", ")")
+                    self.read_balanced("(", ")", nest_subs=True)
                     if self.peek() == ")":
                         self.advance()
                     continue
                 line = self.line
                 self.advance(2)
-                self.nested(self.read_balanced("(", ")"), line)
+                self.nested(self.read_balanced("(", ")", nest_subs=True), line)
                 continue
             if char == "$" and self.peek(1) == "{":
                 self.advance(2)
-                self.read_balanced("{", "}")
+                self.read_balanced("{", "}", nest_subs=True)
                 continue
             if char in "<>" and self.peek(1) == "(":
                 break
@@ -335,7 +358,7 @@ class Tokenizer:
                 if self.peek(1) == "(":
                     line = self.line
                     self.advance(2)
-                    self.nested(self.read_balanced("(", ")"), line)
+                    self.nested(self.read_balanced("(", ")", nest_subs=True), line)
                     redirect_next = False
                     continue
                 if self.text.startswith("<<<", self.i):
@@ -370,7 +393,7 @@ class Tokenizer:
             if char == "(":
                 if self.peek(1) == "(" and (current is None or not current.words):
                     self.advance(2)
-                    self.read_balanced("(", ")")
+                    self.read_balanced("(", ")", nest_subs=True)
                     if self.peek() == ")":
                         self.advance()
                     continue
@@ -548,6 +571,27 @@ def runner_kind(bare):
     return None
 
 
+def runner_flag_issue(kind, stripped):
+    if stripped in ("-c", "-e", "-"):
+        return kind + " " + stripped
+    if stripped.startswith("-c") or stripped.startswith("-e"):
+        return kind + " " + stripped[:2]
+    if stripped.startswith("--"):
+        return None
+    if not stripped.startswith("-") or len(stripped) < 2:
+        return None
+    letters = stripped[1:]
+    if "c" in letters:
+        return kind + " -c"
+    if kind == "python3" and "e" in letters:
+        return kind + " -e"
+    if "i" in letters:
+        return kind + " -i"
+    if kind == "zsh" and "s" in letters:
+        return kind + " -s"
+    return None
+
+
 def runner_script(words):
     for word in words[1:]:
         stripped = word.strip("\"'")
@@ -561,6 +605,42 @@ def runner_script(words):
     return ""
 
 
+def awk_has_program(words):
+    index = 1
+    while index < len(words):
+        stripped = words[index].strip("\"'")
+        if stripped in ("-f", "--file"):
+            return index + 1 < len(words)
+        if stripped.startswith("-f") and stripped != "-f":
+            return stripped not in ("-f-",)
+        if stripped.startswith("--file="):
+            return stripped != "--file=-"
+        if stripped in ("-", "-f-") or stripped == "--file=-":
+            return False
+        if stripped.startswith("-"):
+            index += 1
+            continue
+        return bool(stripped)
+    return False
+
+
+def trap_arg_problems(words, *, require_abs, depth):
+    found = []
+    for word in words[1:]:
+        stripped = word.strip("\"'")
+        if not stripped or stripped in ("-", "--"):
+            continue
+        if stripped.upper() in TRAP_SIGNALS or stripped.isdigit():
+            continue
+        if stripped.startswith("-"):
+            continue
+        nested, _, _, _ = check_text(
+            stripped, require_abs=require_abs, live_range=None, depth=depth + 1
+        )
+        found.extend(nested)
+    return found
+
+
 def script_basename(script):
     return os.path.basename(script.replace("\\", "/"))
 
@@ -572,7 +652,7 @@ def in_live_then(command, live_range):
     return begin <= command.pos < end
 
 
-def check_command(command, functions, *, require_abs=False, live_range=None):
+def check_command(command, functions, *, require_abs=False, live_range=None, depth=0):
     words = command.words
     if not words:
         return []
@@ -596,8 +676,9 @@ def check_command(command, functions, *, require_abs=False, live_range=None):
                 return [where + " " + kind + " must be " + needed]
         for word in words[1:]:
             stripped = word.strip("\"'")
-            if stripped in ("-c", "-e", "-") or stripped.startswith("-c") or stripped.startswith("-e"):
-                return [where + " " + kind + " " + (stripped if stripped in ("-c", "-e", "-") else stripped[:2])]
+            issue = runner_flag_issue(kind, stripped)
+            if issue:
+                return [where + " " + issue]
         script = runner_script(words)
         name = script_basename(script)
         allowed = RUNNERS[kind]
@@ -610,16 +691,38 @@ def check_command(command, functions, *, require_abs=False, live_range=None):
         if command.has_heredoc and not script.endswith(".py") and name not in {"build.sh", "setup-dev-signing.sh"}:
             return [where + " " + kind + " reads a heredoc"]
         return []
+    if base == "trap" or bare == "trap":
+        if depth > 4:
+            return [where + " trap recursion"]
+        return trap_arg_problems(words, require_abs=require_abs, depth=depth)
     if bare in functions or bare in BUILTINS:
         return []
     if bare in ABS_TOOLS or (not require_abs and base in TOOL_BASES):
-        joined = " ".join(words)
-        if base == "rg" and "--pre" in words:
-            return [where + " rg --pre"]
-        if base == "git" and re.search(r"-c\s+alias", joined):
-            return [where + " git -c alias"]
-        if base == "awk" and re.search(r"system\s*\(", joined):
-            return [where + " awk system("]
+        if base == "rg":
+            for word in words[1:]:
+                stripped = word.strip("\"'")
+                if stripped == "--pre" or stripped.startswith("--pre="):
+                    return [where + " rg --pre"]
+        if base == "git":
+            index = 1
+            while index < len(words):
+                stripped = words[index].strip("\"'")
+                nxt = words[index + 1].strip("\"'") if index + 1 < len(words) else ""
+                if stripped in ("-c", "--config") and (
+                    nxt.startswith("alias") or "alias." in nxt
+                ):
+                    return [where + " git -c alias"]
+                if stripped.startswith("-c") and stripped != "-c" and "alias" in stripped:
+                    return [where + " git -c alias"]
+                if stripped.startswith("--config=") and "alias" in stripped:
+                    return [where + " git -c alias"]
+                index += 1
+        if base == "awk":
+            joined = " ".join(word.strip("\"'") for word in words)
+            if re.search(r"system\s*\(", joined):
+                return [where + " awk system("]
+            if not awk_has_program(words):
+                return [where + " awk system("]
         return []
     if require_abs and base in TOOL_BASES and not bare.startswith("/") and bare != "./build/checks":
         return [where + " " + bare + " must be an absolute path"]
@@ -646,7 +749,9 @@ def check_text(text, *, require_abs=False, live_range=None, depth=0):
     problems = []
     for command in tokenizer.commands:
         problems.extend(
-            check_command(command, functions, require_abs=require_abs, live_range=live_range)
+            check_command(
+                command, functions, require_abs=require_abs, live_range=live_range, depth=depth
+            )
         )
     for kind, body, _line in tokenizer.interpreter_heredocs:
         problems.extend(scan_interpreter_body(kind, body, depth))

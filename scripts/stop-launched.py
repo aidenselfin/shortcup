@@ -63,12 +63,19 @@ def pid_alive(pid):
         return True
 
 
+# Public XNU proc_bsdinfo is 136 bytes. pbi_start_tvsec is at offset 120;
+# pbi_start_tvusec follows immediately. Require n >= 136 and range-check.
+BSDINFO_SIZE = 136
+START_TVSEC_OFF = 120
+START_TVUSEC_OFF = 128
+
+
 def identity(pid):
     """pid + ppid + start_tvsec + start_tvusec from proc_pidinfo.
 
-    Returns None if proc_pidinfo fails. Callers that need to decide whether a
-    recorded pid is gone must treat that as 'still remaining' when the pid is
-    alive, not as dead.
+    Returns None if proc_pidinfo fails or the start time is out of range.
+    Callers must not SIGKILL when this returns None: the pid may have been
+    reused, and a missing identity is not a match.
     """
     pid = int(pid)
     lib = libproc()
@@ -78,24 +85,25 @@ def identity(pid):
     if n > size:
         buf = ctypes.create_string_buffer(n)
         n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, n)
-    if n < 144:
+    if n < BSDINFO_SIZE:
         n = lib.proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, buf, size)
         if n > size:
             buf = ctypes.create_string_buffer(n)
             n = lib.proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, buf, n)
-    if n < 144:
+    if n < BSDINFO_SIZE:
         return None
     status = struct.unpack_from("<I", buf, 4)[0]
     pid_v, ppid_v = struct.unpack_from("<II", buf, 12)
     if pid_v != pid:
         return None
-    start_sec = start_usec = None
-    for off in (128, 120):
-        if n >= off + 16:
-            sec, usec = struct.unpack_from("<QQ", buf, off)
-            start_sec, start_usec = int(sec), int(usec)
-            break
-    if start_sec is None:
+    if n < START_TVUSEC_OFF + 8:
+        return None
+    start_sec = int(struct.unpack_from("<Q", buf, START_TVSEC_OFF)[0])
+    start_usec = int(struct.unpack_from("<Q", buf, START_TVUSEC_OFF)[0])
+    now = time.time()
+    if start_usec >= 1_000_000:
+        return None
+    if start_sec <= 0 or start_sec > now + 86400:
         return None
     return {
         "pid": pid_v,
@@ -136,15 +144,8 @@ def is_zombie(pid, live):
 
 def still_that_process(recorded):
     live = identity(recorded["pid"])
-    state = ps_state(recorded["pid"])
     if live is None:
-        if not pid_alive(recorded["pid"]):
-            return False
-        # Zombies often make proc_pidinfo fail while kill(0) still succeeds.
-        if state is not None and state[:1] == "Z":
-            return False
-        # Could not read identity or state: count as remaining, not dead.
-        return True
+        return False
     if not same(live, recorded):
         return False
     if is_zombie(recorded["pid"], live):
@@ -198,7 +199,12 @@ def load_record(path):
 
 
 def send(recorded, sig):
-    if not still_that_process(recorded):
+    live = identity(recorded["pid"])
+    if live is None:
+        return False
+    if not same(live, recorded):
+        return False
+    if is_zombie(recorded["pid"], live):
         return False
     try:
         os.kill(recorded["pid"], sig)

@@ -8,14 +8,17 @@ A process is forbidden when its executable:
   - is under ~/Applications/Shortcup Dev.app or ~/Applications/Shortcup.app
 
 Polling samples about every 0.2s, so a process shorter than that interval can
-be missed unless exec/fork events from eslogger are available (sudo -n, no TCC
-prompt). The short-lived self-test documents that limit when polling is used.
+be missed unless exec/fork events from eslogger are available. sudo -n eslogger
+runs only in GitHub Actions or when SHORTCUP_ESLOGGER=1. Local SAFE runs do not
+invoke sudo. When eslogger is required, a failed start or a short-exec self-test
+that does not see dummy-true is a failure.
 
 Usage: watch-processes.py -- CMD...
 """
 import ctypes
 import json
 import os
+import select
 import shutil
 import signal
 import struct
@@ -28,6 +31,8 @@ PROC_PIDPATHINFO_MAXSIZE = 4096
 PROC_PIDTBSDINFO = 3
 SZOMB = 5
 SAMPLE = 0.2
+WATCH_DEADLINE = 11 * 60
+SELF_CHECK_SHORT = 2.0
 
 
 def repo_root():
@@ -178,6 +183,15 @@ def paths_in(obj):
             yield from paths_in(item)
 
 
+def eslogger_wanted():
+    flag = os.environ.get("SHORTCUP_ESLOGGER", "").strip().lower()
+    if flag in ("0", "false", "no", "off"):
+        return False
+    if flag in ("1", "true", "yes", "on"):
+        return True
+    return os.environ.get("GITHUB_ACTIONS") == "true"
+
+
 def start_eslogger():
     eslogger = "/usr/bin/eslogger"
     if not os.path.isfile(eslogger):
@@ -187,13 +201,23 @@ def start_eslogger():
             ["sudo", "-n", eslogger, "exec", "fork"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
-            text=True,
+            stdin=subprocess.DEVNULL,
         )
     except OSError:
         return None
-    time.sleep(0.2)
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if proc.poll() is not None:
+            return None
+        time.sleep(0.05)
     if proc.poll() is not None:
         return None
+    proc._es_buf = b""
+    if proc.stdout is not None:
+        try:
+            os.set_blocking(proc.stdout.fileno(), False)
+        except (AttributeError, OSError, ValueError):
+            pass
     return proc
 
 
@@ -201,17 +225,32 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
     hits = []
     if proc is None or proc.stdout is None:
         return hits
-    try:
-        os.set_blocking(proc.stdout.fileno(), False)
-    except (AttributeError, OSError, ValueError):
-        pass
+    fd = proc.stdout.fileno()
+    buf = getattr(proc, "_es_buf", b"")
     while True:
-        line = proc.stdout.readline()
-        if not line:
+        try:
+            ready, _, _ = select.select([fd], [], [], 0)
+        except (OSError, ValueError):
+            ready = []
+        if not ready:
             break
         try:
-            data = json.loads(line)
-        except json.JSONDecodeError:
+            chunk = os.read(fd, 65536)
+        except BlockingIOError:
+            break
+        except OSError:
+            chunk = b""
+        if not chunk:
+            break
+        buf += chunk
+    parts = buf.split(b"\n")
+    proc._es_buf = parts[-1]
+    for line in parts[:-1]:
+        if not line.strip():
+            continue
+        try:
+            data = json.loads(line.decode("utf-8", "replace"))
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             continue
         for raw in paths_in(data):
             try:
@@ -262,17 +301,32 @@ def self_check_long(lib, ignore_pids):
             pass
 
 
-def self_check_short(lib, ignore_pids, use_eslogger):
+def self_check_short(lib, ignore_pids, require_eslogger):
     dummy_dir = repo_root() / "build" / "watch-dummy"
     dummy_dir.mkdir(parents=True, exist_ok=True)
     dummy = dummy_dir / "dummy-true"
     shutil.copy("/usr/bin/true", dummy)
     dummy.chmod(0o755)
     loop = subprocess.Popen(["/bin/zsh", "-c", "while true; do " + str(dummy) + "; done"])
-    es_proc = start_eslogger() if use_eslogger else None
+    es_proc = None
+    if require_eslogger:
+        es_proc = start_eslogger()
+        if es_proc is None:
+            print("FAIL: eslogger did not start", file=sys.stderr)
+            if loop.poll() is None:
+                loop.send_signal(signal.SIGKILL)
+                try:
+                    loop.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
+            try:
+                dummy.unlink()
+            except OSError:
+                pass
+            return False
     seen = False
     try:
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + SELF_CHECK_SHORT
         while time.monotonic() < deadline:
             if es_proc is not None:
                 try:
@@ -282,11 +336,18 @@ def self_check_short(lib, ignore_pids, use_eslogger):
                             break
                 except RuntimeError:
                     es_proc = None
+                    if require_eslogger:
+                        print("FAIL: eslogger exited during the short-lived self-test", file=sys.stderr)
+                        return False
             for pid, path, reason in sample_hits(lib, ignore_pids | {loop.pid}, loop.pid):
                 if reason == "executable under build/" and path is not None and path.name == "dummy-true":
                     seen = True
                     break
-                if reason == "running pid with no executable path" and in_tree(lib, pid, loop.pid):
+                if (
+                    not require_eslogger
+                    and reason == "running pid with no executable path"
+                    and in_tree(lib, pid, loop.pid)
+                ):
                     seen = True
                     break
             if seen:
@@ -295,7 +356,7 @@ def self_check_short(lib, ignore_pids, use_eslogger):
         if seen:
             print("PASS: process watcher detected a short-lived executable under build/", flush=True)
             return True
-        if use_eslogger and es_proc is not None:
+        if require_eslogger:
             print("FAIL: eslogger did not observe a short-lived executable under build/", file=sys.stderr)
             return False
         print(
@@ -304,12 +365,7 @@ def self_check_short(lib, ignore_pids, use_eslogger):
         )
         return True
     finally:
-        if es_proc is not None and es_proc.poll() is None:
-            es_proc.kill()
-            try:
-                es_proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                pass
+        kill_proc(es_proc)
         if loop.poll() is None:
             loop.send_signal(signal.SIGKILL)
             try:
@@ -339,35 +395,47 @@ def kill_proc(proc):
 def run_watched(command):
     lib = libproc()
     me = {os.getpid(), os.getppid()}
-    es_probe = start_eslogger()
-    use_eslogger = es_probe is not None
-    kill_proc(es_probe)
+    require_es = eslogger_wanted()
+    if require_es:
+        es_probe = start_eslogger()
+        if es_probe is None:
+            print("FAIL: eslogger did not start", file=sys.stderr)
+            return 1
+        kill_proc(es_probe)
     if not self_check_long(lib, me):
         return 1
-    if not self_check_short(lib, me, use_eslogger):
+    if not self_check_short(lib, me, require_es):
         return 1
     proc = None
     es_proc = None
     hits = []
     error = None
+    deadline = time.monotonic() + WATCH_DEADLINE
     try:
         proc = subprocess.Popen(command)
         ignore = me | {proc.pid}
-        if use_eslogger:
+        if require_es:
             es_proc = start_eslogger()
             if es_proc is None:
-                use_eslogger = False
+                print("FAIL: eslogger did not start", file=sys.stderr)
+                return 1
         while proc.poll() is None:
+            if time.monotonic() >= deadline:
+                error = RuntimeError("process watcher deadline")
+                break
             hits = sample_hits(lib, ignore, proc.pid)
             if es_proc is not None:
                 try:
                     hits.extend(eslogger_hits(es_proc, proc.pid, ignore, lib))
                 except RuntimeError:
+                    if require_es:
+                        error = RuntimeError("eslogger exited")
+                        break
                     es_proc = None
             if hits:
                 break
             time.sleep(SAMPLE)
-        if not hits:
+        if error is None and not hits:
             hits = sample_hits(lib, ignore, proc.pid)
     except KeyboardInterrupt:
         raise

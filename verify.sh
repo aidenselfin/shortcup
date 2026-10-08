@@ -1,7 +1,7 @@
 #!/bin/zsh
 # Safe Shortcup checks. This script does not launch an app unless you pass --live.
 # --live starts windows on the screen and sends synthetic clicks. Leave it off.
-# Default launch on the development Mac uses LaunchServices with -g. CI passes
+# Default launch on the dev Mac uses LaunchServices with -g. CI passes
 # --direct-launch or SHORTCUP_LAUNCH=direct so the executable is started directly.
 set -euo pipefail
 cd "${0:A:h}"

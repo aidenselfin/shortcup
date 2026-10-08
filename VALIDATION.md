@@ -95,7 +95,7 @@ build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.microsoft.
 build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.MobileSMS
 ```
 
-개발용 Mac(macOS 26.6.2) 덤프:
+the dev Mac (macOS 26.6.2) 덤프:
 
 - Chrome 154: `performClose:`는 ⇧⌘W 하나(충돌 없음). `performMiniaturize:`는 ⌘M. `toggleFullScreen:`은 ⌃⌘F와 ⌘ 없는 F 둘. `performZoom:`는 단축키 없음.
 - Finder: 닫기·최소화·전체 화면 항목에 `AXIdentifier`가 없다. 제목 폴백이 필요하다.
