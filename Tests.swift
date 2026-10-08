@@ -10,9 +10,16 @@ import Foundation
         assert(shortcutText(character: "", virtualKey: nil, glyph: nil, modifiers: 0) == nil)
         assert(shortcutText(character: "r", virtualKey: nil, glyph: nil, modifiers: nil) == nil)
         assert(shortcutText(character: "f", virtualKey: nil, glyph: nil, modifiers: 8) == "F")
+        assert(shortcutText(character: "", virtualKey: nil, glyph: 99, modifiers: 0) == nil)
+        assert(shortcutText(character: "", virtualKey: nil, glyph: 103, modifiers: 0) == nil)
+        assert(shortcutText(character: "", virtualKey: nil, glyph: 102, modifiers: 0) == "⌘ ↖")
+        assert(shortcutText(character: "", virtualKey: 0, glyph: 100, modifiers: 0) == "⌘ ←")
+        assert(shortcutText(character: "w", virtualKey: nil, glyph: 99, modifiers: 0) == "⌘ W")
         assert(windowShortcutText(character: "w", virtualKey: nil, glyph: nil, modifiers: 1) == "⇧⌘ W")
         assert(windowShortcutText(character: "w", virtualKey: 13, glyph: 0, modifiers: 0) == "⌘ W")
         assert(windowShortcutText(character: "w", virtualKey: 13, glyph: 99, modifiers: 0) == nil)
+        assert(windowShortcutText(character: "", virtualKey: 0, glyph: 100, modifiers: 0) == "⌘ ←")
+        assert(windowShortcutText(character: "a", virtualKey: 0, glyph: nil, modifiers: 0) == "⌘ A")
         assert(windowShortcutText(character: "", virtualKey: 123, glyph: 100, modifiers: 0) == "⌘ ←")
         assert(windowShortcutText(character: "", virtualKey: 124, glyph: 100, modifiers: 0) == nil)
         assert(windowShortcutText(character: "w", virtualKey: 13, glyph: 100, modifiers: 0) == nil)
@@ -32,9 +39,18 @@ import Foundation
         assert(windowButtonFallbackTitles().contains("윈도우 닫기"))
         assert(!windowButtonFallbackTitles().contains("탭 닫기"))
         assert(!windowButtonFallbackTitles().contains("close tab"))
-        assert(presentedWindowShortcut("F", subrole: "AXFullScreenButton") == "🌐F")
+        assert(presentedWindowShortcut("F", subrole: "AXFullScreenButton") == nil)
         assert(presentedWindowShortcut("⌃⌘ F", subrole: "AXFullScreenButton") == "⌃⌘ F")
         assert(presentedWindowShortcut("F", subrole: "AXCloseButton") == "F")
+        assert(standardWindowButtonSubrole(windowSubrole: "AXStandardWindow", ownsClose: true, ownsMinimize: false, ownsFullScreen: false, ownsZoom: false) == "AXCloseButton")
+        assert(standardWindowButtonSubrole(windowSubrole: "AXDialog", ownsClose: true, ownsMinimize: false, ownsFullScreen: false, ownsZoom: false) == nil)
+        assert(standardWindowButtonSubrole(windowSubrole: "AXStandardWindow", ownsClose: false, ownsMinimize: false, ownsFullScreen: false, ownsZoom: false) == nil)
+        assert(standardWindowButtonSubrole(windowSubrole: "AXStandardWindow", ownsClose: true, ownsMinimize: false, ownsFullScreen: false, ownsZoom: true) == nil)
+        assert(isWindowCommandMenu("파일") && isWindowCommandMenu("Window") && !isWindowCommandMenu("History") && !isWindowCommandMenu("책갈피"))
+        assert(isDynamicMenuList("Open Recent") && isDynamicMenuList("방문 기록") && !isDynamicMenuList("Minimize"))
+        assert(shouldReadWindowMenuTitle(identifier: "", hasShortcut: true))
+        assert(!shouldReadWindowMenuTitle(identifier: "performClose:", hasShortcut: true))
+        assert(!shouldReadWindowMenuTitle(identifier: "", hasShortcut: false))
         let commands = [MenuCommand(title: "새 탭", shortcut: "⌘ T", enabled: true)]
         let aliases = commandAliases(appID: "com.google.Chrome", role: "AXButton", label: "새 탭")
         assert(resolveCommand(commands, aliases: aliases)?.shortcut == "⌘ T")
@@ -117,7 +133,25 @@ import Foundation
         assert(chromeClose?.title == "창 닫기")
         assert(chromeClose?.shortcut == "⇧⌘ W")
         assert(resolveWindowButton(candidates: chromeIDs, role: "AXButton", subrole: "AXMinimizeButton")?.identifier == "_performMiniaturize:")
-        assert(presentedWindowShortcut(resolveWindowButton(candidates: chromeIDs, role: "AXButton", subrole: "AXFullScreenButton")?.shortcut, subrole: "AXFullScreenButton") == "🌐F")
+        assert(presentedWindowShortcut(resolveWindowButton(candidates: chromeIDs, role: "AXButton", subrole: "AXFullScreenButton")?.shortcut, subrole: "AXFullScreenButton") == nil)
+        let chromeFullScreen = [
+            WindowMenuCandidate(identifier: "performClose:", title: "", shortcut: "⇧⌘ W", enabled: true),
+            WindowMenuCandidate(identifier: "performMiniaturize:", title: "", shortcut: "⌘ M", enabled: true),
+            WindowMenuCandidate(identifier: "toggleFullScreen:", title: "", shortcut: "⌃⌘ F", enabled: true),
+            WindowMenuCandidate(identifier: "toggleFullScreen:", title: "", shortcut: "F", enabled: true),
+            WindowMenuCandidate(identifier: "performZoom:", title: "", shortcut: nil, enabled: true)
+        ]
+        assert(windowSubroleLookup(chromeFullScreen, subrole: "AXFullScreenButton") == .shortcut("⌃⌘ F"))
+        assert(windowSubroleLookup(chromeFullScreen, subrole: "AXCloseButton") == .shortcut("⇧⌘ W"))
+        assert(windowSubroleLookup(chromeFullScreen, subrole: "AXZoomButton") == .noShortcut)
+        assert(!subrolesNeedingTitleScan(chromeFullScreen).contains("AXZoomButton"))
+        assert(!subrolesNeedingTitleScan(chromeFullScreen).contains("AXCloseButton"))
+        let finderMenus = [
+            WindowMenuCandidate(identifier: "", title: "윈도우 닫기", shortcut: "⌘ W", enabled: true),
+            WindowMenuCandidate(identifier: "", title: "최소화", shortcut: "⌘ M", enabled: true)
+        ]
+        assert(subrolesNeedingTitleScan(finderMenus).contains("AXCloseButton"))
+        assert(windowSubroleLookup(finderMenus, subrole: "AXCloseButton") == .needsTitle)
         assert(subroleForMenuIdentifier("performCloseExtra:") == nil)
         assert(subroleForMenuIdentifier("performClose:") == "AXCloseButton")
         let collision = [
@@ -143,6 +177,20 @@ import Foundation
         let table = ["ko": ["Close Window": "윈도우 닫기", "Enter Full Screen": "전체 화면 시작"],
                      "de": ["Close Window": "Fenster schließen"]]
         assert(localizedWindowTitles(table, language: "ko-KR", subrole: "AXCloseButton") == ["윈도우 닫기"])
+        let zh = ["zh_CN": ["Close Window": "关闭窗口"], "zh-Hant": ["Close Window": "關閉視窗"], "en": ["Close Window": "Close Window"]]
+        assert(menuLocaleColumn(zh, language: "zh-CN")?["Close Window"] == "关闭窗口")
+        assert(menuLocaleColumn(zh, language: "zh_TW")?["Close Window"] == "關閉視窗")
+        let genericZh = ["zh-Hant": ["Zoom": "縮放"], "zh-Hans": ["Zoom": "缩放"]]
+        assert(menuLocaleColumn(genericZh, language: "zh")?["Zoom"] == "缩放")
+        assert(preferredInterfaceLanguage(appleLanguages: ["ko-KR"], fallback: ["en"]) == "ko-KR")
+        assert(preferredInterfaceLanguage(appleLanguages: [], fallback: ["en-US"]) == "en-US")
+        let scannedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let failedScan = WindowMenuCacheEntry(shortcuts: [:], complete: false, attempts: 1, scannedAt: scannedAt)
+        assert(shouldRescanWindowMenu(entry: nil, now: scannedAt))
+        assert(!shouldRescanWindowMenu(entry: WindowMenuCacheEntry(shortcuts: ["AXCloseButton": "⌘ W"], complete: true, attempts: 1, scannedAt: scannedAt), now: scannedAt.addingTimeInterval(30)))
+        assert(!shouldRescanWindowMenu(entry: failedScan, now: scannedAt.addingTimeInterval(1)))
+        assert(shouldRescanWindowMenu(entry: failedScan, now: scannedAt.addingTimeInterval(2)))
+        assert(!shouldRescanWindowMenu(entry: WindowMenuCacheEntry(shortcuts: [:], complete: false, attempts: 3, scannedAt: scannedAt), now: scannedAt.addingTimeInterval(30)))
         let german = [WindowMenuCandidate(identifier: "", title: "Fenster schließen", shortcut: "⇧⌘ W", enabled: true)]
         assert(resolveWindowButton(candidates: german, role: "AXButton", subrole: "AXCloseButton", extraTitles: localizedWindowTitles(table, language: "de", subrole: "AXCloseButton"))?.shortcut == "⇧⌘ W")
         let safariKey = WindowMenuCacheKey(bundleID: "com.apple.Safari", version: "26.0+1", language: "ko")

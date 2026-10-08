@@ -73,15 +73,14 @@
 
 `zsh build.sh`의 순수 함수 검사. 단축키 문자열은 메뉴 항목에서 온 값을 포맷한 결과다.
 
-- ⇧+⌘+W 포맷은 `⇧⌘ W`. ⌘ 없는 F는 전체 화면 항목에서만 `🌐F`로 보여 준다. 이 Mac에서 메뉴가 실제로 그렇게 주는지는 아래 덤프로 확인한다.
-- 식별자 `performClose:`가 창 닫기에만 있으면 그 단축키를 쓴다. 탭 닫기가 `commandDispatch:`이면 빨강 버튼은 창 닫기다.
-- 같은 `performClose:`에 단축키가 둘이면 식별자로는 고르지 않고 제목으로 넘어간다. 제목도 서로 다르면 힌트 없음. 단축키로 추정하지 않는다.
-- 식별자가 비어 있으면 영어·한국어 제목, 또는 loctable 번역으로 찾는다.
-- `_performMiniaturize:`와 `toggleFullScreenMode:`도 해당 버튼에 연결된다.
-- 창 버튼 단축키는 `shortcutText`의 글리프 표를 쓰지 않는다. 글리프 99(Caps Lock)와 103(Help)는 힌트가 없고, Home은 102, End는 105다. 글리프와 가상 키가 같은 키가 아니면 힌트 없음.
-- `validation-events.jsonl`과 `validation-state.json`에 창 버튼 힌트를 쓸 때는 제목 키를 넣지 않는다. 단축키와 source만 남긴다.
+- 표준 창의 버튼 참조와 클릭 요소가 같을 때만 힌트를 낸다. 탭·시트의 닫기 버튼은 제외한다.
+- ⇧+⌘+W 포맷은 `⇧⌘ W`. 전체 화면 식별자에 ⌘가 있는 단축키와 ⌘ 없는 F가 같이 있으면 ⌘가 있는 쪽만 보여 준다. ⌘ 없는 F만 있으면 힌트 없음. `🌐F`는 쓰지 않는다.
+- 식별자가 있고 단축키가 없으면(Chrome의 `performZoom:`) 제목으로 다시 찾지 않는다.
+- 식별자가 없으면 파일·윈도우·보기 메뉴의 제목으로 찾는다. Finder가 이 경우다.
+- 창 버튼 경로는 `validation-events.jsonl`과 `validation-state.json`에 힌트와 프로브를 쓰지 않는다.
+- 글리프 99(Caps Lock)와 103(Help)는 힌트가 없다. Home은 102, End는 105다. 가상 키 0은 없는 값으로 본다.
 
-실제 클릭으로 힌트가 뜨는지는 v0.1의 62개 검사에 포함되지 않는다.
+실제 클릭으로 힌트가 뜨는지는 v0.1의 62개 검사에 포함되지 않는다. 이 워크스페이스에서는 아직 트래픽 라이트 클릭을 확인하지 못했다.
 
 ### 메뉴 식별자 덤프
 
@@ -96,6 +95,9 @@ build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.microsoft.
 build/Shortcup.app/Contents/MacOS/Shortcup --dump-window-menu-ids com.apple.MobileSMS
 ```
 
-볼 것: `performClose:`가 탭 닫기에도 붙는지(collision=true), 최소화 식별자가 `_performMiniaturize:`인지, 전체 화면이 shortcut `F`로 나오는지(fullscreen-bare-f).
+Juhyeon의 Mac(macOS 26.6.2) 덤프:
 
-2026-10-08에 이 워크스페이스 빌드로 Finder 덤프를 시도했다. `trusted=false`로 끝났고 메뉴는 읽지 못했다. 그래서 Safari의 탭 닫기가 `performClose:`인지, macOS 26 최소화가 `_performMiniaturize:`인지, 전체 화면이 ⌘ 없는 F인지는 아직 확인하지 못했다. `🌐F` 표시는 그 AX 값(⌘ 없음 + F)을 가정한 것이고, 실제 메뉴가 그 값을 주는지는 미검증이다. Finder·Chrome은 실행 중이었다. Safari·VS Code·메시지(MobileSMS)는 설치되어 있다.
+- Chrome 154: `performClose:`는 ⇧⌘W 하나(충돌 없음). `performMiniaturize:`는 ⌘M. `toggleFullScreen:`은 ⌃⌘F와 ⌘ 없는 F 둘. `performZoom:`는 단축키 없음.
+- Finder: 닫기·최소화·전체 화면 항목에 `AXIdentifier`가 없다. 제목 폴백이 필요하다.
+
+Safari의 탭 닫기가 `performClose:`인지는 이 덤프에 없다. 실제 버튼 클릭은 아직이다. 손쉬운 사용에 이 워크스페이스의 `build/Shortcup.app`을 넣은 뒤, 표준 창의 닫기·최소화·전체 화면을 눌러 패널 힌트를 확인하면 된다. 애드혹 서명이라 다시 빌드하면 권한을 다시 줘야 할 수 있다. `~/shortcup`의 앱과는 다른 경로다.

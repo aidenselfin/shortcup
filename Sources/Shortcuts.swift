@@ -9,14 +9,11 @@ struct Hint: Equatable {
 }
 
 func shortcutText(character: String, virtualKey: Int?, glyph: Int?, modifiers: Int?) -> String? {
-    let glyphs = [2: "⇥", 3: "⇤", 9: "Space", 10: "⌦", 11: "↩", 12: "↩", 23: "⌫",
-                  27: "⎋", 98: "⇞", 99: "↖", 100: "←", 101: "→", 103: "↘", 104: "↑", 106: "↓", 107: "⇟"]
-    let keys = [36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋", 115: "↖", 116: "⇞",
-                117: "⌦", 119: "↘", 121: "⇟", 123: "←", 124: "→", 125: "↓", 126: "↑"]
+    let glyphCode: Int? = (glyph == nil || glyph == 0) ? nil : glyph
+    let keyCode: Int? = (virtualKey == nil || virtualKey == 0) ? nil : virtualKey
     let controlChars = ["\u{08}": "⌫", "\u{09}": "⇥", "\u{0d}": "↩", "\u{1b}": "⎋",
                         "\u{7f}": "⌫", "\u{1c}": "←", "\u{1d}": "→", "\u{1e}": "↑", "\u{1f}": "↓", " ": "Space"]
-    var key = glyph.flatMap { glyphs[$0] } ?? virtualKey.flatMap { keys[$0] }
-    if key == nil, let glyph, (111...122).contains(glyph) { key = "F\(glyph - 110)" }
+    var key = glyphCode.flatMap(windowGlyphText) ?? keyCode.flatMap(windowVirtualKeyText)
     if key == nil, !character.isEmpty { key = controlChars[character] ?? character.uppercased() }
     guard let key, let modifiers else { return nil }
     return ((modifiers & 4 != 0 ? "⌃" : "") + (modifiers & 2 != 0 ? "⌥" : "") +
@@ -24,15 +21,17 @@ func shortcutText(character: String, virtualKey: Int?, glyph: Int?, modifiers: I
     ).trimmingCharacters(in: .whitespaces)
 }
 
-// Window-button shortcuts only. Does not use shortcutText's glyph table.
-// Glyph 0 is no glyph. 99 is Caps Lock and 103 is Help, so they produce no hint.
+// Window-button shortcuts. Glyph 0 is no glyph. 99 is Caps Lock and 103 is Help, so they produce no hint.
+// shortcutText uses this same glyph table.
 // Home is 102 and End is 105. A mapped glyph and a virtual key that is not that same key produce no hint.
 func windowShortcutText(character: String, virtualKey: Int?, glyph: Int?, modifiers: Int?) -> String? {
+    // Virtual key 0 is unset here. Letter A uses the same code, and menu items carry that letter in the character.
     let glyphCode: Int? = (glyph == nil || glyph == 0) ? nil : glyph
+    let keyCode: Int? = (virtualKey == nil || virtualKey == 0) ? nil : virtualKey
     let fromGlyph = glyphCode.flatMap(windowGlyphText)
-    let fromKey = virtualKey.flatMap(windowVirtualKeyText)
+    let fromKey = keyCode.flatMap(windowVirtualKeyText)
     if glyphCode != nil && fromGlyph == nil { return nil }
-    if let fromGlyph, virtualKey != nil, fromGlyph != fromKey { return nil }
+    if let fromGlyph, keyCode != nil, fromGlyph != fromKey { return nil }
     var key = fromGlyph ?? fromKey
     if key == nil, glyphCode == nil, !character.isEmpty {
         let controlChars = ["\u{08}": "⌫", "\u{09}": "⇥", "\u{0d}": "↩", "\u{1b}": "⎋",
@@ -168,6 +167,16 @@ func subroleForMenuIdentifier(_ identifier: String) -> String? {
     }
 }
 
+func windowTitleAllowlist(subroles: Set<String>, extras: [String]) -> Set<String> {
+    var names = Set<String>()
+    for subrole in subroles {
+        guard let query = windowButtonQuery(role: "AXButton", subrole: subrole) else { continue }
+        names.formUnion((query.preferred + query.fallback).map(normalized))
+    }
+    names.formUnion(extras.map(normalized))
+    return names
+}
+
 func windowButtonFallbackTitles() -> Set<String> {
     var names = Set<String>()
     for subrole in ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"] {
@@ -194,6 +203,7 @@ func isWindowMenuDumpCandidate(_ item: WindowMenuCandidate) -> Bool {
 }
 
 // One distinct shortcut among exact identifiers. Differing shortcuts are a collision, not a vote.
+// Full screen is the exception confirmed on Chrome: keep the item whose shortcut includes ⌘.
 func matchWindowButtonIdentifier(_ items: [WindowMenuCandidate], subrole: String) -> WindowMenuCandidate? {
     let ids = Set(windowButtonIdentifiers(subrole: subrole))
     guard !ids.isEmpty else { return nil }
@@ -201,8 +211,11 @@ func matchWindowButtonIdentifier(_ items: [WindowMenuCandidate], subrole: String
     guard !matches.isEmpty else { return nil }
     let enabled = matches.filter(\.enabled)
     let pool = enabled.isEmpty ? matches : enabled
-    guard Set(pool.compactMap(\.shortcut)).count == 1 else { return nil }
-    return pool.first
+    if Set(pool.compactMap(\.shortcut)).count == 1 { return pool.first }
+    guard subrole == "AXFullScreenButton" else { return nil }
+    let commanded = pool.filter { ($0.shortcut ?? "").contains("⌘") }
+    guard Set(commanded.compactMap(\.shortcut)).count == 1 else { return nil }
+    return commanded.first
 }
 
 func resolveWindowButton(_ commands: [MenuCommand], role: String, subrole: String, extraTitles: [String] = []) -> MenuCommand? {
@@ -224,11 +237,72 @@ func resolveWindowButton(candidates: [WindowMenuCandidate], role: String, subrol
     return candidates.first { $0.title == command.title && $0.shortcut == command.shortcut && $0.enabled }
 }
 
-// Full-screen items whose AX modifiers are "no command" + F. Globe is not an AX modifier bit.
+// Bare F on full screen is not shown. Chrome also reports ⌃⌘F for the same identifier, and there is no globe bit in AX.
 func presentedWindowShortcut(_ shortcut: String?, subrole: String) -> String? {
     guard let shortcut else { return nil }
-    if subrole == "AXFullScreenButton" && shortcut == "F" { return "🌐F" }
+    if subrole == "AXFullScreenButton" && !shortcut.contains("⌘") { return nil }
     return shortcut
+}
+
+func standardWindowButtonSubrole(windowSubrole: String, ownsClose: Bool, ownsMinimize: Bool, ownsFullScreen: Bool, ownsZoom: Bool) -> String? {
+    guard windowSubrole == "AXStandardWindow" else { return nil }
+    let matches = [ownsClose ? "AXCloseButton" : nil, ownsMinimize ? "AXMinimizeButton" : nil,
+                   ownsFullScreen ? "AXFullScreenButton" : nil, ownsZoom ? "AXZoomButton" : nil].compactMap { $0 }
+    guard matches.count == 1 else { return nil }
+    return matches[0]
+}
+
+func isWindowCommandMenu(_ title: String) -> Bool {
+    ["file", "파일", "window", "윈도우", "창", "view", "보기"].contains(normalized(title))
+}
+
+func isDynamicMenuList(_ title: String) -> Bool {
+    ["history", "방문 기록", "bookmarks", "책갈피", "북마크", "open recent", "recent items",
+     "최근 사용", "최근 항목", "최근 사용 항목", "최근 열기"].contains(normalized(title))
+}
+
+func shouldReadWindowMenuTitle(identifier: String, hasShortcut: Bool) -> Bool {
+    identifier.isEmpty && hasShortcut
+}
+
+enum WindowMenuLookup: Equatable {
+    case shortcut(String)
+    case noShortcut
+    case needsTitle
+}
+
+func windowSubroleLookup(_ items: [WindowMenuCandidate], subrole: String) -> WindowMenuLookup {
+    let ids = Set(windowButtonIdentifiers(subrole: subrole))
+    let identified = items.filter { ids.contains($0.identifier) }
+    guard !identified.isEmpty else { return .needsTitle }
+    if let item = matchWindowButtonIdentifier(identified, subrole: subrole),
+       let shortcut = presentedWindowShortcut(item.shortcut, subrole: subrole) {
+        return .shortcut(shortcut)
+    }
+    return .noShortcut
+}
+
+func subrolesNeedingTitleScan(_ items: [WindowMenuCandidate]) -> [String] {
+    ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"].filter {
+        windowSubroleLookup(items, subrole: $0) == .needsTitle
+    }
+}
+
+struct WindowMenuCacheEntry: Equatable {
+    var shortcuts: [String: String]
+    var complete: Bool
+    var attempts: Int
+    var scannedAt: Date
+}
+
+func shouldRescanWindowMenu(entry: WindowMenuCacheEntry?, now: Date, limit: Int = 3, delay: TimeInterval = 2) -> Bool {
+    guard let entry else { return true }
+    if entry.complete || entry.attempts >= limit { return false }
+    return now.timeIntervalSince(entry.scannedAt) >= delay
+}
+
+func preferredInterfaceLanguage(appleLanguages: [String], fallback: [String]) -> String {
+    appleLanguages.first ?? fallback.first ?? "en"
 }
 
 func localizedWindowTitles(_ table: [String: [String: String]], language: String, subrole: String) -> [String] {
@@ -244,12 +318,39 @@ func localizedWindowTitles(_ table: [String: [String: String]], language: String
     return keys.compactMap { column[$0] }.filter { !$0.isEmpty }
 }
 
+func canonicalLocale(_ code: String) -> String {
+    code.replacingOccurrences(of: "_", with: "-")
+}
+
+func localeAliasOrder(_ code: String) -> [String] {
+    switch canonicalLocale(code) {
+    case "zh-CN", "zh-SG", "zh-Hans-CN": return ["zh-Hans", "zh"]
+    case "zh-TW", "zh-HK", "zh-MO", "zh-Hant-TW": return ["zh-Hant", "zh"]
+    case "zh-Hans": return ["zh-CN", "zh"]
+    case "zh-Hant": return ["zh-TW", "zh"]
+    default: return []
+    }
+}
+
 func menuLocaleColumn(_ table: [String: [String: String]], language: String) -> [String: String]? {
-    if let exact = table[language] { return exact }
-    let prefix = language.split(separator: "-").first.map(String.init) ?? language
-    if let column = table[prefix] { return column }
-    if let column = table.first(where: { $0.key.hasPrefix(prefix + "-") || $0.key == prefix })?.value { return column }
-    return table["en"]
+    let indexed = table.keys.map { key -> (String, String) in (canonicalLocale(key), key) }.sorted { lhs, rhs in
+        if lhs.0 == rhs.0 { return lhs.1 < rhs.1 }
+        return lhs.0 < rhs.0
+    }
+    func lookup(_ code: String) -> [String: String]? {
+        let want = canonicalLocale(code)
+        guard let found = indexed.first(where: { $0.0 == want }) else { return nil }
+        return table[found.1]
+    }
+    let code = canonicalLocale(language)
+    if let column = lookup(code) { return column }
+    for alias in localeAliasOrder(code) {
+        if let column = lookup(alias) { return column }
+    }
+    let prefix = code.split(separator: "-").first.map(String.init) ?? code
+    if let column = lookup(prefix) { return column }
+    if let found = indexed.first(where: { $0.0.hasPrefix(prefix + "-") }) { return table[found.1] }
+    return lookup("en")
 }
 
 func windowMenuFindings(_ items: [WindowMenuCandidate]) -> [String] {
