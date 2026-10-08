@@ -41,6 +41,7 @@ func dumpSnapshotAndExit() {
 final class DevSelfTest {
     let listener: ClickListener
     var hints: [Hint] = []
+    var fixtureFrames: [ClickFrame] = []
     init(listener: ClickListener) { self.listener = listener }
 
     func start() {
@@ -59,8 +60,15 @@ final class DevSelfTest {
         let control = value("--control")
         let canary = (try? String(contentsOfFile: value("--canary-file"), encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !control.isEmpty { watchQuit(control) }
+        let launchMethod = value("--launch-method") == "direct" ? "direct" : "open"
         func finish(_ object: [String: Any], code: Int32) {
-            if let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), !out.isEmpty {
+            var stamped = object
+            let axTrusted = AXIsProcessTrusted()
+            stamped["axTrusted"] = axTrusted
+            stamped["trusted"] = axTrusted
+            stamped["launchMethod"] = launchMethod
+            if let data = try? JSONSerialization.data(withJSONObject: stamped, options: [.sortedKeys]), !out.isEmpty {
                 try? data.write(to: URL(fileURLWithPath: out), options: .atomic)
             }
             if !control.isEmpty { FileManager.default.createFile(atPath: control + "/quit", contents: Data()) }
@@ -83,10 +91,16 @@ final class DevSelfTest {
             self?.hints.append(hint)
         }
         let opened = Process()
-        opened.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        opened.arguments = ["-n", fixturePath, "--args", "--control", control, "--canary-file", value("--canary-file")]
-        try? opened.run()
-        opened.waitUntilExit()
+        if launchMethod == "direct" {
+            opened.executableURL = URL(fileURLWithPath: (fixturePath as NSString).appendingPathComponent("Contents/MacOS/Fixture"))
+            opened.arguments = ["--control", control, "--canary-file", value("--canary-file")]
+            try? opened.run()
+        } else {
+            opened.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+            opened.arguments = ["-g", "-n", fixturePath, "--args", "--control", control, "--canary-file", value("--canary-file")]
+            try? opened.run()
+            opened.waitUntilExit()
+        }
         var fixture: NSRunningApplication?
         for _ in 0..<40 {
             if FileManager.default.fileExists(atPath: control + "/ready") {
@@ -116,6 +130,9 @@ final class DevSelfTest {
         }
         let closeShortcut = menuShortcut(in: ax, identifier: nil, title: "윈도우 닫기") ?? ""
         let miniShortcut = menuShortcut(in: ax, identifier: "performMiniaturize:", title: nil) ?? ""
+        fixtureFrames = windows.compactMap { frame(of: $0) }.map {
+            ClickFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height)
+        }
         var cases: [[String: String]] = []
         cases.append(await expect(point: buttonPoint(standard, "AXCloseButton"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: closeShortcut, hinted: true))
         let firstWalks = listener.session.menuWalks
@@ -128,15 +145,15 @@ final class DevSelfTest {
             let presented = presentedWindowShortcut(fullShortcut, subrole: "AXFullScreenButton") ?? ""
             cases.append(await expect(point: full, pid: fixture.processIdentifier, subrole: "AXFullScreenButton", identifier: "toggleFullScreen:", shortcut: presented, hinted: !presented.isEmpty))
         }
-        cases.append(await expect(point: findPoint(standard, identifier: "fixture.tabClose"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: "", hinted: false))
-        cases.append(await expect(point: findPoint(standard, identifier: "fixture.sheetClose"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: "", hinted: false))
+        cases.append(await expect(point: findPoint(in: windows, identifier: "fixture.tabClose"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: "", hinted: false))
+        cases.append(await expect(point: findPoint(in: windows, identifier: "fixture.sheetClose"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: "", hinted: false))
         if let floating {
             cases.append(await expect(point: buttonPoint(floating, "AXCloseButton"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: "", hinted: false))
         } else {
             cases.append(row(subrole: "AXSystemFloatingWindow", identifier: "", shortcut: "", result: "fail"))
         }
-        cases.append(await expect(point: findPoint(standard, title: "New Tab"), pid: fixture.processIdentifier, subrole: "", identifier: "", shortcut: "", hinted: false))
-        cases.append(await expect(point: findPoint(standard, title: "Back"), pid: fixture.processIdentifier, subrole: "", identifier: "", shortcut: "", hinted: false))
+        cases.append(await expect(point: findPoint(in: windows, title: "New Tab"), pid: fixture.processIdentifier, subrole: "", identifier: "", shortcut: "", hinted: false))
+        cases.append(await expect(point: findPoint(in: windows, title: "Back"), pid: fixture.processIdentifier, subrole: "", identifier: "", shortcut: "", hinted: false))
         let beforeIdle = listener.session.world.log.count
         try? await Task.sleep(nanoseconds: 10_000_000_000)
         listener.waitUntilIdle()
@@ -172,10 +189,35 @@ final class DevSelfTest {
         ["subrole": subrole, "identifier": identifier, "shortcut": shortcut, "result": result]
     }
 
+    func watchQuit(_ control: String) {
+        Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
+            guard FileManager.default.fileExists(atPath: control + "/quit") else { return }
+            NSApp.terminate(nil)
+            exit(0)
+        }
+    }
+
     func expect(point: CGPoint?, pid: pid_t, subrole: String, identifier: String, shortcut: String, hinted: Bool) async -> [String: String] {
-        guard let point, pidAt(point) == pid,
-              NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == fixtureBundleID else {
-            return row(subrole: subrole, identifier: identifier, shortcut: "", result: "fail")
+        guard let point else {
+            return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
+        }
+        guard let decision = permit(point, pid: pid, subrole: subrole) else {
+            return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
+        }
+        if decision == .skip {
+            return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
+        }
+        if decision == .inspectOnly {
+            guard permit(point, pid: pid, subrole: subrole) == .inspectOnly else {
+                return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
+            }
+            let hint = listener.inspectHint(at: point)
+            let got = hint?.source == "window" ? (hint?.shortcut ?? "") : ""
+            let pass = hinted ? (!shortcut.isEmpty && got == shortcut) : (hint == nil || hint?.source != "window")
+            return row(subrole: subrole, identifier: identifier, shortcut: pass ? shortcut : got, result: pass ? "pass" : "fail")
+        }
+        guard permit(point, pid: pid, subrole: subrole) == .post else {
+            return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
         }
         let before = hints.count
         listener.allowedRect = CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)
@@ -195,9 +237,42 @@ final class DevSelfTest {
         return row(subrole: subrole, identifier: identifier, shortcut: pass ? shortcut : got, result: pass ? "pass" : "fail")
     }
 
+    // System-wide pid first. A mismatch returns nil and does not read the scoped element or any attribute.
+    func permit(_ point: CGPoint, pid: pid_t, subrole: String) -> ClickPermission? {
+        guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == fixtureBundleID else { return nil }
+        let click = ClickPoint(x: point.x, y: point.y)
+        guard fixtureFrames.contains(where: { $0.contains(click) }) else { return .skip }
+        let system = pidOfHit(on: AXUIElementCreateSystemWide(), at: point)
+        guard readsScopedHit(systemPID: system, fixturePID: pid) else { return .skip }
+        let scoped = pidOfHit(on: AXUIElementCreateApplication(pid), at: point)
+        return clickPermission(point: click, frames: fixtureFrames, systemPID: system, scopedPID: scoped, fixturePID: pid, subrole: subrole)
+    }
+
+    func pidOfHit(on root: AXUIElement, at point: CGPoint) -> pid_t? {
+        AXUIElementSetMessagingTimeout(root, axMessagingTimeout)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &hit) == .success, let hit else { return nil }
+        var owner: pid_t = 0
+        guard AXUIElementGetPid(hit, &owner) == .success else { return nil }
+        return owner
+    }
+
+    func frame(of element: AXUIElement) -> CGRect? {
+        var pos: CFTypeRef?
+        var size: CFTypeRef?
+        AXUIElementSetMessagingTimeout(element, axMessagingTimeout)
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
+              let pos, let size, CFGetTypeID(pos) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
+        var origin = CGPoint.zero
+        var box = CGSize.zero
+        guard AXValueGetValue(pos as! AXValue, .cgPoint, &origin), AXValueGetValue(size as! AXValue, .cgSize, &box) else { return nil }
+        return CGRect(origin: origin, size: box)
+    }
+
     func hangSeconds(on window: AXUIElement, pid: pid_t) async -> Double {
-        guard let point = buttonPoint(window, "AXCloseButton"), pidAt(point) == pid,
-              NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == fixtureBundleID else { return -1 }
+        guard let point = buttonPoint(window, "AXCloseButton"),
+              permit(point, pid: pid, subrole: "AXCloseButton") == .inspectOnly else { return -1 }
         let control = CommandLine.arguments
         func value(_ name: String) -> String {
             guard let index = control.firstIndex(of: name), control.count > index + 1 else { return "" }
@@ -264,6 +339,13 @@ final class DevSelfTest {
         guard let button = element(window, attribute) else { return nil }
         AXUIElementSetMessagingTimeout(button, axMessagingTimeout)
         return center(button)
+    }
+
+    func findPoint(in windows: [AXUIElement], identifier: String? = nil, title: String? = nil) -> CGPoint? {
+        for window in windows {
+            if let point = findPoint(window, identifier: identifier, title: title) { return point }
+        }
+        return nil
     }
 
     func findPoint(_ root: AXUIElement, identifier: String? = nil, title: String? = nil) -> CGPoint? {
