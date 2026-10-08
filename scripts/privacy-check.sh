@@ -238,10 +238,13 @@ scripts/privacy-fixtures/clean-users-path.txt
 scripts/privacy-fixtures/keychain-password
 scripts/privacy-fixtures/fake-github-token.txt"
 
-# The first commits of this check had the marker only once per fixture file. For
-# those exact commits a fixture path is skipped when its blob has the marker.
-legacy_fixture_commits="94d496732e60e1551155b01aea4ec3ca5b2b2d04
-2542ec18fff050c167074836f8120369f5cd28d0"
+# Commits of this check written before the current fixture rules. "fixture" skips a
+# fixture path whose blob has the marker (one marker per file back then); any other
+# entry skips that exact path in that exact commit.
+legacy_paths="94d496732e60e1551155b01aea4ec3ca5b2b2d04 fixture
+2542ec18fff050c167074836f8120369f5cd28d0 fixture
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
@@ -252,16 +255,21 @@ f7c8745f7cc94f03a33b3df5167a1f76ee8dcfa1 owner-device
 c5e8e8b546bd72ae9211f84afb922d09c72cbc48 owner-device"
 
 legacy_skips() {
-  local commit=$1 sha path
-  while IFS= read -r sha; do
+  local commit=$1 sha entry path
+  while read -r sha entry; do
     [[ "$sha" == "$commit" ]] || continue
+    if [[ "$entry" != fixture ]]; then
+      printf '%s\n' "$entry"
+      continue
+    fi
     while IFS= read -r path; do
       if [[ "$(git cat-file -t "${commit}:${path}" 2> /dev/null)" == blob ]] &&
-        git cat-file blob "${commit}:${path}" | grep -F -q -- "$fixture_marker"; then
+        git cat-file blob "${commit}:${path}" > "$work/legacy" &&
+        grep -F -q -- "$fixture_marker" "$work/legacy"; then
         printf '%s\n' "$path"
       fi
     done <<< "$fixture_paths"
-  done <<< "$legacy_fixture_commits"
+  done <<< "$legacy_paths"
 }
 
 allowed_rules() {
