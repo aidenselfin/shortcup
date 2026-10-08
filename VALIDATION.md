@@ -101,3 +101,22 @@ Juhyeon의 Mac(macOS 26.6.2) 덤프:
 - Finder: 닫기·최소화·전체 화면 항목에 `AXIdentifier`가 없다. 제목 폴백이 필요하다.
 
 Safari의 탭 닫기가 `performClose:`인지는 이 덤프에 없다. 실제 버튼 클릭은 아직이다. 손쉬운 사용에 이 워크스페이스의 `build/Shortcup.app`을 넣은 뒤, 표준 창의 닫기·최소화·전체 화면을 눌러 패널 힌트를 확인하면 된다. 애드혹 서명이라 다시 빌드하면 권한을 다시 줘야 할 수 있다. `~/shortcup`의 앱과는 다른 경로다.
+
+## 빠른 검증
+
+`zsh verify.sh`는 앱을 열지 않는다. 클릭도 보내지 않는다. 스냅샷 재생, 제품 바이너리에 개발용 자가시험이 없는 것, 전용 키체인 서명, 결과 JSON 형식, 디스크의 카나리 문자열만 본다. 창을 띄우는 검사는 `zsh verify.sh --live` 뒤에만 있다. 그 플래그는 화면에 경고를 찍은 뒤 오른쪽 아래 모서리에 작은 픽스처 창을 연다. 기본 명령으로는 실행하지 않는다.
+
+서명은 로그인 키체인이 아니라 `~/Library/Keychains/shortcup-dev.keychain-db`의 `Shortcup Dev` 인증서를 쓴다. 비밀번호 파일은 `~/.config/shortcup/keychain-password`(모드 600)이고 저장소에 넣지 않는다. 개발 앱은 `~/Applications/Shortcup Dev.app`, 번들 ID는 `com.shortcup.dev`라서 `~/shortcup`의 앱과 권한이 섞이지 않는다. `codesign -d -r-`에 `certificate leaf`가 있어야 재빌드 뒤에도 같은 권한으로 남는다.
+
+`--selftest`와 합성 클릭은 `-D SHORTCUP_DEV` 빌드에만 들어간다. 제품 빌드에는 컴파일하지 않는다. 클릭은 픽스처 번들 ID와 pid가 둘 다 맞을 때만 보낸다. 터미널에서 바이너리를 직접 실행하면 부모 앱의 손쉬운 사용 권한을 물려받으므로, 라이브 모드는 `open`으로만 띄운다. Terminal이나 Cursor에 손쉬운 사용을 주지 않는다.
+
+Chrome·Finder 스냅샷은 위의 메뉴 덤프를 재생용 JSON으로 옮긴 것이다. 라이브 녹화는 개발 앱의 손쉬운 사용이 생긴 뒤에야 가능해서, 아직 그 앱으로 다시 받지는 않았다. 글리프 99(Caps Lock)와 103(Help)는 힌트가 없다. 이 규칙은 바꾸지 않았다. 이 Mac의 일반 창은 `AXFullScreenButton`을 주지 않는다(오류 -25212). Chrome의 전체 화면 단축키 `⌃⌘ F`는 스냅샷으로 확인한다.
+
+KNOWN-FAIL 두 개는 실패로 세지 않고, 통과로 치지도 않는다. 예전 `--validate-once`가 주소 칸 값을 쓰는 것, 메뉴·도구막대 검증 로그에 명령 제목이 남는 것이다. 이번 검사에서는 그 모드를 실행하지 않는다.
+
+### 나중에 `--live`를 켤 때 한 번만 할 일
+
+1. 저장소에서 `zsh setup-dev-signing.sh`. 전용 키체인에 인증서를 만든다. 이 Mac에는 이미 만들어져 있다. 로그인 키체인 암호 창이 뜨면 취소한다. 서명에 그 창은 필요 없다.
+2. 시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서 **Shortcup Dev** (`/Users/juhyeon/Applications/Shortcup Dev.app`, `com.shortcup.dev`)만 켠다. 켠 뒤 그 앱을 끝내고 다시 연다.
+3. 스위치는 켜져 있는데 `verify.sh --live`가 여전히 권한 없음이면, 그 번들만 `tccutil reset Accessibility com.shortcup.dev` 하고 다시 켠다. 다른 앱은 리셋하지 않는다.
+4. Terminal과 Cursor에는 손쉬운 사용을 주지 않는다.
