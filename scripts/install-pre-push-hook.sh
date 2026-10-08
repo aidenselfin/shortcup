@@ -5,10 +5,10 @@ set -euo pipefail
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
-hooks=$(git rev-parse --git-path hooks)
-if [[ "$hooks" != /* ]]; then
-  hooks="$root/$hooks"
-fi
+# Always the repository's own hooks directory. core.hooksPath is left untouched,
+# including when a global or tool-specific path is already set.
+git_dir=$(git rev-parse --absolute-git-dir)
+hooks="$git_dir/hooks"
 mkdir -p "$hooks"
 
 cat > "$hooks/pre-push" << 'EOF'
