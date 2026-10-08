@@ -42,6 +42,7 @@ final class DevSelfTest {
     let listener: ClickListener
     var hints: [Hint] = []
     var fixtureFrames: [ClickFrame] = []
+    var fixturePID: pid_t = 0
     init(listener: ClickListener) { self.listener = listener }
 
     func start() {
@@ -113,6 +114,7 @@ final class DevSelfTest {
             finish(report(cases: [row(subrole: "", identifier: "", shortcut: "", result: "fail")], hang: -1, canary: canary, firstWalks: 0, secondWalks: 0, idle: -1), code: 0)
             return
         }
+        fixturePID = fixture.processIdentifier
         listener.allowedPID = fixture.processIdentifier
         listener.allowedBundleID = fixtureBundleID
         try? await Task.sleep(nanoseconds: 400_000_000)
@@ -197,14 +199,14 @@ final class DevSelfTest {
         guard let point else {
             return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
         }
-        guard let decision = permit(point, pid: pid, subrole: subrole) else {
+        guard let decision = permit(point, pid: pid) else {
             return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
         }
         if decision == .skip {
             return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
         }
         if decision == .inspectOnly {
-            guard permit(point, pid: pid, subrole: subrole) == .inspectOnly else {
+            guard permit(point, pid: pid) == .inspectOnly else {
                 return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
             }
             let hint = listener.inspectHint(at: point)
@@ -212,13 +214,22 @@ final class DevSelfTest {
             let pass = hinted ? (!shortcut.isEmpty && got == shortcut) : (hint == nil || hint?.source != "window")
             return row(subrole: subrole, identifier: identifier, shortcut: pass ? shortcut : got, result: pass ? "pass" : "fail")
         }
-        guard permit(point, pid: pid, subrole: subrole) == .post else {
+        guard permit(point, pid: pid) == .post else {
             return row(subrole: subrole, identifier: identifier, shortcut: "", result: "skip")
         }
         let before = hints.count
         listener.allowedRect = CGRect(x: point.x - 3, y: point.y - 3, width: 6, height: 6)
         post(point, .leftMouseDown)
         try? await Task.sleep(nanoseconds: 60_000_000)
+        // The listener's session tap only sees system-wide events, so the click is
+        // posted there and checked again right before each half. If the point no
+        // longer belongs to a postable fixture element, the release goes to the
+        // fixture pid only and the case fails.
+        guard permit(point, pid: pid) == .post else {
+            post(point, .leftMouseUp, onlyTo: pid)
+            listener.allowedRect = CGRect.null
+            return row(subrole: subrole, identifier: identifier, shortcut: "", result: "fail")
+        }
         post(point, .leftMouseUp)
         let deadline = Date().addingTimeInterval(hinted ? 2 : 0.8)
         while Date() < deadline {
@@ -236,8 +247,8 @@ final class DevSelfTest {
     // Frames are read again on every call, because a fixture window can move between checks.
     // System-wide pid first. A mismatch returns .skip and does not read the scoped element or any attribute.
     // The click decision uses the subrole of the element actually at the point, not the expected one.
-    func permit(_ point: CGPoint, pid: pid_t, subrole _: String) -> ClickPermission? {
-        guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == fixtureBundleID else { return nil }
+    func permit(_ point: CGPoint, pid: pid_t) -> ClickPermission? {
+        guard pid == fixturePID, NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == fixtureBundleID else { return nil }
         let click = ClickPoint(x: point.x, y: point.y)
         fixtureFrames = currentFixtureFrames(pid: pid)
         guard fixtureFrames.contains(where: { $0.contains(click) }) else { return .skip }
@@ -246,8 +257,16 @@ final class DevSelfTest {
         let scoped = hit(on: AXUIElementCreateApplication(pid), at: point)
         guard let scoped, scoped.pid == pid else { return .skip }
         AXUIElementSetMessagingTimeout(scoped.element, axMessagingTimeout)
-        let actual = string(scoped.element, AXAttr.subrole)
+        var raw: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(scoped.element, AXAttr.subrole as CFString, &raw)
+        let actual = subroleRead(errorCode: status.rawValue, value: raw as? String)
         return clickPermission(point: click, frames: fixtureFrames, systemPID: system?.pid, scopedPID: scoped.pid, fixturePID: pid, subrole: actual)
+    }
+
+    // Every attribute read in the selftest goes through here. Nothing outside the fixture is read.
+    func owned(_ element: AXUIElement) -> Bool {
+        var owner: pid_t = 0
+        return fixturePID > 0 && AXUIElementGetPid(element, &owner) == .success && owner == fixturePID
     }
 
     func currentFixtureFrames(pid: pid_t) -> [ClickFrame] {
@@ -271,7 +290,7 @@ final class DevSelfTest {
         var pos: CFTypeRef?
         var size: CFTypeRef?
         AXUIElementSetMessagingTimeout(element, axMessagingTimeout)
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
+        guard owned(element), AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
               AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
               let pos, let size, CFGetTypeID(pos) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
         var origin = CGPoint.zero
@@ -282,7 +301,7 @@ final class DevSelfTest {
 
     func hangSeconds(on window: AXUIElement, pid: pid_t) async -> Double {
         guard let point = buttonPoint(window, "AXCloseButton"),
-              permit(point, pid: pid, subrole: "AXCloseButton") == .inspectOnly else { return -1 }
+              permit(point, pid: pid) == .inspectOnly else { return -1 }
         let control = CommandLine.arguments
         func value(_ name: String) -> String {
             guard let index = control.firstIndex(of: name), control.count > index + 1 else { return "" }
@@ -300,25 +319,30 @@ final class DevSelfTest {
         return elapsed
     }
 
-    func post(_ point: CGPoint, _ type: CGEventType) {
-        CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
+    func post(_ point: CGPoint, _ type: CGEventType, onlyTo pid: pid_t? = nil) {
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        if let pid {
+            event.postToPid(pid)
+        } else {
+            event.post(tap: .cghidEventTap)
+        }
     }
 
     func string(_ element: AXUIElement, _ name: String) -> String {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return "" }
+        guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return "" }
         return value as? String ?? ""
     }
 
     func elements(_ element: AXUIElement, _ name: String) -> [AXUIElement]? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value as? [AXUIElement]
     }
 
     func element(_ element: AXUIElement, _ name: String) -> AXUIElement? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
+        guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success,
               let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
         return (value as! AXUIElement)
     }
@@ -326,7 +350,7 @@ final class DevSelfTest {
     func center(_ element: AXUIElement) -> CGPoint? {
         var pos: CFTypeRef?
         var size: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
+        guard owned(element), AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &pos) == .success,
               AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &size) == .success,
               let pos, let size, CFGetTypeID(pos) == AXValueGetTypeID(), CFGetTypeID(size) == AXValueGetTypeID() else { return nil }
         var point = CGPoint.zero
@@ -392,7 +416,7 @@ final class DevSelfTest {
 
     func number(_ element: AXUIElement, _ name: String) -> Int? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return (value as? NSNumber)?.intValue
     }
 }

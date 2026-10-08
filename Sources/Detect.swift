@@ -65,11 +65,40 @@ enum ClickPermission: Equatable {
     case post
 }
 
-func clickPermission(point: ClickPoint, frames: [ClickFrame], systemPID: Int32?, scopedPID: Int32?, fixturePID: Int32, subrole: String) -> ClickPermission {
+// The AXSubrole read at the click point. A timeout or any other failed read is
+// .failed, which never posts: the element could be a window button.
+enum SubroleRead: Equatable {
+    case value(String)
+    case absent
+    case failed
+}
+
+// errorCode is the AXError raw value. Only kAXErrorNoValue (-25212) and
+// kAXErrorAttributeUnsupported (-25205) mean the element has no subrole.
+func subroleRead(errorCode: Int32, value: String?) -> SubroleRead {
+    switch errorCode {
+    case 0:
+        guard let value else { return .failed }
+        return value.isEmpty ? .absent : .value(value)
+    case -25212, -25205:
+        return .absent
+    default:
+        return .failed
+    }
+}
+
+func clickPermission(point: ClickPoint, frames: [ClickFrame], systemPID: Int32?, scopedPID: Int32?, fixturePID: Int32, subrole: SubroleRead) -> ClickPermission {
     guard frames.contains(where: { $0.contains(point) }) else { return .skip }
     guard readsScopedHit(systemPID: systemPID, fixturePID: fixturePID) else { return .skip }
     guard scopedPID == fixturePID else { return .skip }
-    return allowsSyntheticClick(subrole: subrole) ? .post : .inspectOnly
+    switch subrole {
+    case .failed:
+        return .skip
+    case .absent:
+        return .post
+    case .value(let name):
+        return allowsSyntheticClick(subrole: name) ? .post : .inspectOnly
+    }
 }
 
 struct AXRead: Equatable {
