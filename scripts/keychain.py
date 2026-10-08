@@ -326,14 +326,60 @@ def _child_exit_code(status):
     return 1
 
 
+# C-locale security(1) getpass strings from Apple SecurityTool.
+# prompt_password() prints "password to unlock %s: " or "password: ".
+# set-keychain-password prints "Old Password: ", "New Password: ",
+# and "Retype New Password: ".
+SECURITY_PROMPT_EXACT = (
+    b"password:",
+    b"password to unlock keychain:",
+    b"old password:",
+    b"new password:",
+    b"retype new password:",
+    b"enter password:",
+)
+
+
+def match_security_prompt(line, keychain_path):
+    """Return the allow-listed template name, or None.
+
+    The line, with trailing whitespace stripped, must end with ':' and equal
+    one of the C-locale security(1) prompts. The keychain path is substituted
+    into the '%s' forms internally and never returned.
+    """
+    stripped = line.replace(b"\r", b"").rstrip()
+    if not stripped.endswith(b":"):
+        return None
+    lower = stripped.lower()
+    for exact in SECURITY_PROMPT_EXACT:
+        if lower == exact:
+            return exact.decode("ascii")
+    path = keychain_path.encode() if isinstance(keychain_path, str) else keychain_path
+    base = os.path.basename(path)
+    named = (
+        ("password to unlock %s:", b"password to unlock " + path + b":"),
+        ("password to unlock %s:", b"password to unlock " + base + b":"),
+        ("password for %s:", b"password for " + path + b":"),
+        ("password for %s:", b"password for " + base + b":"),
+        ('password for "%s":', b'password for "' + path + b'":'),
+        ('password for "%s":', b'password for "' + base + b'":'),
+    )
+    for name, expected in named:
+        if lower == expected.lower():
+            return name
+    return None
+
+
 def set_partition_list_security(keychain_path, password):
     """Drive /usr/bin/security without putting the password on argv.
 
     security set-key-partition-list without -k calls getpass() on its
     controlling tty. A private pty is that tty, so this does not hang and
-    does not prompt on the caller's terminal.     The password is written only after a C-locale prompt whose line or token
-    has an allow-listed prefix (password, passphrase, passwd). Raw pty bytes
-    are never logged.
+    does not prompt on the caller's terminal. The password is written only
+    after a C-locale prompt that equals an allow-listed security(1) string
+    (trailing whitespace stripped, must end with ':'). Raw pty bytes are
+    never logged. Diagnostics report byte count, whether a prompt matched
+    and which template, and the child exit status.
     """
     argv = [
         "/usr/bin/security",
@@ -352,36 +398,40 @@ def set_partition_list_security(keychain_path, password):
         os._exit(127)
     sent = False
     prompt = b""
+    prompt_match = None
+    bytes_got = 0
     child_status = None
     deadline = time.monotonic() + 20
-    # C-locale getpass lines. Match a line or token prefix, not a mid-word substring.
-    prompt_prefixes = (
-        b"password",
-        b"passphrase",
-        b"passwd",
-        b"enter password",
-        b"enter the password",
-        b"keychain password",
-        b"unlock keychain",
-        b"please enter",
-    )
-    prompt_tokens = (b"password", b"passphrase", b"passwd")
 
     def prompt_ready(buf):
-        text = buf.lower().replace(b"\r", b"\n")
+        text = buf.replace(b"\r", b"\n")
         text = re.sub(br"\x1b\[[0-9;]*[A-Za-z]", b"", text)
         text = bytes(ch for ch in text if ch >= 32 or ch in (9, 10, 13))
         for line in text.split(b"\n"):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if any(stripped.startswith(prefix) for prefix in prompt_prefixes):
-                return True
-            for token in stripped.split():
-                token = token.strip(b":.*[]()")
-                if any(token.startswith(prefix) for prefix in prompt_tokens):
-                    return True
-        return False
+            name = match_security_prompt(line, keychain_path)
+            if name:
+                return name
+        return None
+
+    def status_text():
+        if child_status is None:
+            return "none"
+        return str(_child_exit_code(child_status))
+
+    def log_pty():
+        print(
+            "pty bytes="
+            + str(bytes_got)
+            + " prompt="
+            + ("yes" if prompt_match else "no")
+            + " match="
+            + (prompt_match or "-")
+            + " sent="
+            + ("1" if sent else "0")
+            + " status="
+            + status_text(),
+            file=sys.stderr,
+        )
 
     def reap(hang=False):
         nonlocal child_status
@@ -415,9 +465,11 @@ def set_partition_list_security(keychain_path, password):
                         break
                     time.sleep(0.05)
                     continue
+                bytes_got += len(chunk)
                 if not sent:
-                    prompt += chunk.lower().replace(b"\r", b"\n")
-                    if prompt_ready(prompt):
+                    prompt += chunk
+                    prompt_match = prompt_ready(prompt)
+                    if prompt_match:
                         os.write(fd, password + b"\n")
                         sent = True
                         prompt = b""
@@ -432,9 +484,11 @@ def set_partition_list_security(keychain_path, password):
                 except OSError:
                     pass
                 reap(hang=True)
+                log_pty()
                 if not sent:
                     fail("security set-key-partition-list had no allowed password prompt")
                 fail("security set-key-partition-list did not finish")
+        log_pty()
         if child_status is None:
             fail("security set-key-partition-list did not finish")
         code = _child_exit_code(child_status)

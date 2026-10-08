@@ -27,7 +27,7 @@ BUILTINS = {
 ABS_TOOLS = {
     "/bin/sleep", "/bin/mkdir", "/bin/rm", "/bin/cat", "/bin/cp", "/bin/mv", "/bin/chmod",
     "/bin/ps", "/bin/zsh", "/bin/kill", "/bin/echo",
-    "/usr/bin/stat", "/usr/bin/grep", "/usr/bin/awk", "/usr/bin/sed", "/usr/bin/tr",
+    "/usr/bin/stat", "/usr/bin/grep", "/usr/bin/sed", "/usr/bin/tr",
     "/usr/bin/tail", "/usr/bin/head", "/usr/bin/wc", "/usr/bin/cut", "/usr/bin/sort",
     "/usr/bin/git", "/usr/bin/swiftc", "/usr/bin/codesign", "/usr/bin/vtool", "/usr/bin/nm",
     "/usr/bin/strings", "/usr/bin/cmp", "/usr/bin/ditto", "/usr/bin/openssl", "/usr/bin/security",
@@ -55,6 +55,8 @@ RUNNERS = {
         "scripts/write-schema-samples.py",
         "scripts/rg-blocked.py",
         "scripts/watch-processes.py",
+        "scripts/vtool-minos.py",
+        "scripts/run-deadline.py",
     },
 }
 REJECTED = {
@@ -81,8 +83,10 @@ class Command:
         self.live = live
         self.pos = pos
         self.words = []
+        self.assigns = []
         self.has_herestring = False
         self.has_heredoc = False
+        self.array = False
 
 
 class Tokenizer:
@@ -431,6 +435,7 @@ class Tokenizer:
             if not current.words and word in PREFIXES:
                 continue
             if not current.words and ASSIGN.match(word):
+                current.assigns.append(word)
                 continue
             current.words.append(word)
             if len(current.words) == 1:
@@ -577,7 +582,7 @@ def runner_flag_issue(kind, stripped):
     if stripped.startswith("-c") or stripped.startswith("-e"):
         return kind + " " + stripped[:2]
     if stripped.startswith("--"):
-        return None
+        return kind + " " + stripped.split("=", 1)[0]
     if not stripped.startswith("-") or len(stripped) < 2:
         return None
     letters = stripped[1:]
@@ -662,6 +667,17 @@ def check_command(command, functions, *, require_abs=False, live_range=None, dep
     where = "line " + str(command.line)
     if base in REJECTED or bare in REJECTED:
         return [where + " " + (base or bare) + " is not allowed"]
+    if base != "unset":
+        for word in list(getattr(command, "assigns", [])) + words:
+            name = word.split("=", 1)[0].strip("\"'")
+            if name.upper().startswith("GIT_CONFIG_"):
+                return [where + " GIT_CONFIG_"]
+            if word.startswith("RIPGREP_CONFIG_PATH="):
+                return [where + " RIPGREP_CONFIG_PATH"]
+    if base == "awk" or bare == "awk":
+        if not awk_has_program(words):
+            return [where + " awk program from stdin"]
+        return [where + " awk is not allowed"]
     if head.startswith("$") or head.startswith('"$') or (head.startswith('"') and "$" in head):
         return [where + " variable command " + head]
     if head.startswith("'") and bare not in BUILTINS and bare not in functions:
@@ -676,9 +692,12 @@ def check_command(command, functions, *, require_abs=False, live_range=None, dep
                 return [where + " " + kind + " must be " + needed]
         for word in words[1:]:
             stripped = word.strip("\"'")
-            issue = runner_flag_issue(kind, stripped)
-            if issue:
-                return [where + " " + issue]
+            if stripped.startswith("-"):
+                issue = runner_flag_issue(kind, stripped)
+                if issue:
+                    return [where + " " + issue]
+                continue
+            break
         script = runner_script(words)
         name = script_basename(script)
         allowed = RUNNERS[kind]
@@ -704,25 +723,10 @@ def check_command(command, functions, *, require_abs=False, live_range=None, dep
                 if stripped == "--pre" or stripped.startswith("--pre="):
                     return [where + " rg --pre"]
         if base == "git":
-            index = 1
-            while index < len(words):
-                stripped = words[index].strip("\"'")
-                nxt = words[index + 1].strip("\"'") if index + 1 < len(words) else ""
-                if stripped in ("-c", "--config") and (
-                    nxt.startswith("alias") or "alias." in nxt
-                ):
-                    return [where + " git -c alias"]
-                if stripped.startswith("-c") and stripped != "-c" and "alias" in stripped:
-                    return [where + " git -c alias"]
-                if stripped.startswith("--config=") and "alias" in stripped:
-                    return [where + " git -c alias"]
-                index += 1
-        if base == "awk":
-            joined = " ".join(word.strip("\"'") for word in words)
-            if re.search(r"system\s*\(", joined):
-                return [where + " awk system("]
-            if not awk_has_program(words):
-                return [where + " awk system("]
+            for word in words[1:]:
+                stripped = word.strip("\"'")
+                if stripped in ("-c", "--config") or stripped.startswith("-c") or stripped.startswith("--config"):
+                    return [where + " git -c"]
         return []
     if require_abs and base in TOOL_BASES and not bare.startswith("/") and bare != "./build/checks":
         return [where + " " + bare + " must be an absolute path"]
@@ -743,10 +747,27 @@ def scan_interpreter_body(kind, body, depth):
     return found
 
 
+BANNED_SNIPPETS = (
+    ("${(", "zsh parameter-expansion flags"),
+    ("(e:", "glob qualifier (e:"),
+    ("(+", "glob qualifier (+"),
+)
+
+
+def banned_constructs(text):
+    blanked = blank_comments(text)
+    found = []
+    for snippet, name in BANNED_SNIPPETS:
+        if snippet in blanked:
+            found.append(name)
+    return found
+
+
 def check_text(text, *, require_abs=False, live_range=None, depth=0):
     tokenizer = parse(text)
     functions = tokenizer.functions
     problems = []
+    problems.extend(banned_constructs(text))
     for command in tokenizer.commands:
         problems.extend(
             check_command(

@@ -31,7 +31,7 @@ PROC_PIDPATHINFO_MAXSIZE = 4096
 PROC_PIDTBSDINFO = 3
 SZOMB = 5
 SAMPLE = 0.2
-WATCH_DEADLINE = 11 * 60
+WATCH_DEADLINE = 9 * 60
 SELF_CHECK_SHORT = 2.0
 
 
@@ -324,7 +324,8 @@ def self_check_short(lib, ignore_pids, require_eslogger):
             except OSError:
                 pass
             return False
-    seen = False
+    seen_eslogger = False
+    seen_polling = False
     try:
         deadline = time.monotonic() + SELF_CHECK_SHORT
         while time.monotonic() < deadline:
@@ -332,7 +333,7 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 try:
                     for _pid, path, reason in eslogger_hits(es_proc, loop.pid, ignore_pids, lib):
                         if reason == "executable under build/" and "dummy-true" in str(path):
-                            seen = True
+                            seen_eslogger = True
                             break
                 except RuntimeError:
                     es_proc = None
@@ -341,24 +342,38 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                         return False
             for pid, path, reason in sample_hits(lib, ignore_pids | {loop.pid}, loop.pid):
                 if reason == "executable under build/" and path is not None and path.name == "dummy-true":
-                    seen = True
+                    seen_polling = True
                     break
                 if (
                     not require_eslogger
                     and reason == "running pid with no executable path"
                     and in_tree(lib, pid, loop.pid)
                 ):
-                    seen = True
+                    seen_polling = True
                     break
-            if seen:
+            if require_eslogger and seen_eslogger:
+                break
+            if not require_eslogger and (seen_eslogger or seen_polling):
                 break
             time.sleep(0.02)
-        if seen:
-            print("PASS: process watcher detected a short-lived executable under build/", flush=True)
-            return True
         if require_eslogger:
+            if seen_eslogger:
+                print(
+                    "PASS: process watcher eslogger detected a short-lived executable under build/",
+                    flush=True,
+                )
+                return True
             print("FAIL: eslogger did not observe a short-lived executable under build/", file=sys.stderr)
             return False
+        if seen_eslogger or seen_polling:
+            path_name = "eslogger" if seen_eslogger else "polling"
+            print(
+                "PASS: process watcher "
+                + path_name
+                + " detected a short-lived executable under build/",
+                flush=True,
+            )
+            return True
         print(
             "NOTE: polling sample interval is 0.2s; processes shorter than that can be missed",
             flush=True,

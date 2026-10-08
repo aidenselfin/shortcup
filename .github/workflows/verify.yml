@@ -28,8 +28,8 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Install pinned ripgrep and pcre2
-        timeout-minutes: 5
+      - name: Install pinned ripgrep
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           VERSION=14.1.1
@@ -47,29 +47,28 @@ jobs:
           fi
           /bin/cp "/tmp/ripgrep-${VERSION}-aarch64-apple-darwin/rg" "$DEST/rg"
           /bin/chmod 755 "$DEST/rg"
-          # Official darwin rg links Homebrew pcre2. Install pinned 10.45 when missing.
           PCRE2_PREFIX=/opt/homebrew/opt/pcre2
           if [[ ! -d /opt/homebrew ]]; then
             PCRE2_PREFIX=/usr/local/opt/pcre2
           fi
-          if [[ ! -f "${PCRE2_PREFIX}/lib/libpcre2-8.0.dylib" ]]; then
-            PCRE2_VERSION=10.45
-            PCRE2_ARCHIVE="pcre2-${PCRE2_VERSION}.tar.bz2"
-            PCRE2_URL="https://github.com/PCRE2Project/pcre2/releases/download/pcre2-${PCRE2_VERSION}/${PCRE2_ARCHIVE}"
-            PCRE2_SHA256=21547f3516120c75597e5b30a992e27a592a31950b5140e7b8bfde3f192033c4
-            PCRE2_TMP="$(/usr/bin/mktemp)"
-            /usr/bin/curl -sSL -o "$PCRE2_TMP" "$PCRE2_URL"
-            echo "${PCRE2_SHA256}  ${PCRE2_TMP}" | /usr/bin/shasum -a 256 -c -
-            /usr/bin/tar -xjf "$PCRE2_TMP" -C /tmp
-            (
-              cd "/tmp/pcre2-${PCRE2_VERSION}"
-              ./configure --prefix=/tmp/pcre2-${PCRE2_VERSION}-prefix --enable-shared --disable-static
-              /usr/bin/make -j"$(/usr/sbin/sysctl -n hw.ncpu)"
-              /usr/bin/make install
-            )
-            /bin/mkdir -p "${PCRE2_PREFIX}/lib"
-            /bin/cp "/tmp/pcre2-${PCRE2_VERSION}-prefix/lib/libpcre2-8.0.dylib" "${PCRE2_PREFIX}/lib/libpcre2-8.0.dylib"
-            /usr/bin/install_name_tool -id "${PCRE2_PREFIX}/lib/libpcre2-8.0.dylib" "${PCRE2_PREFIX}/lib/libpcre2-8.0.dylib"
+          PCRE2_DYLIB="${PCRE2_PREFIX}/lib/libpcre2-8.0.dylib"
+          if [[ ! -f "$PCRE2_DYLIB" ]]; then
+            echo "FAIL: pcre2 is missing at ${PCRE2_DYLIB}. The pinned rg binary needs libpcre2-8.0.dylib."
+            exit 1
+          fi
+          if [[ -x "${PCRE2_PREFIX}/bin/pcre2-config" ]]; then
+            PCRE2_VER="$("${PCRE2_PREFIX}/bin/pcre2-config" --version)"
+            case "$PCRE2_VER" in
+              10.*) ;;
+              *)
+                echo "FAIL: pcre2 version is ${PCRE2_VER}, expected 10.x ABI for libpcre2-8.0.dylib"
+                exit 1
+                ;;
+            esac
+          fi
+          if ! "$DEST/rg" --version >/dev/null; then
+            echo "FAIL: rg could not load pcre2 at ${PCRE2_DYLIB}"
+            exit 1
           fi
 
       - name: SAFE verify

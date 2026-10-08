@@ -15,7 +15,7 @@ if [[ "$mode" == "--dev" ]]; then
     Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Sources/SelfTest.swift \
     -o "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" \
     -framework AppKit -framework ApplicationServices -framework Carbon
-  minos="$(/usr/bin/vtool -show-build "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" | /usr/bin/awk '/minos/ { print $2; exit }')"
+  minos="$(/usr/bin/vtool -show-build "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" | /usr/bin/python3 scripts/vtool-minos.py)"
   [[ -n "$minos" ]]
   /bin/cat > "build/Shortcup Dev.app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -57,7 +57,7 @@ EOF
 fi
 /bin/mkdir -p build/Shortcup.app/Contents/MacOS
 /usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
-minos="$(/usr/bin/vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | /usr/bin/awk '/minos/ { print $2; exit }')"
+minos="$(/usr/bin/vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | /usr/bin/python3 scripts/vtool-minos.py)"
 [[ -n "$minos" ]]
 # Keep the checked-in plist in sync with the binary before copying it into the bundle.
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minos" Info.plist

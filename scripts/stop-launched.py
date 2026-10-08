@@ -145,7 +145,14 @@ def is_zombie(pid, live):
 def still_that_process(recorded):
     live = identity(recorded["pid"])
     if live is None:
-        return False
+        if not pid_alive(recorded["pid"]):
+            return False
+        state = ps_state(recorded["pid"])
+        if state is not None and state[:1] == "Z":
+            return False
+        # Alive, not a zombie, identity unreadable: remaining, but send()
+        # must not signal.
+        return True
     if not same(live, recorded):
         return False
     if is_zombie(recorded["pid"], live):

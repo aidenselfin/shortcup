@@ -5,14 +5,16 @@
 # --direct-launch or SHORTCUP_LAUNCH=direct so the executable is started directly.
 set -euo pipefail
 cd "${0:A:h}"
+unset RIPGREP_CONFIG_PATH
 
 run_rg() {
+  unset RIPGREP_CONFIG_PATH
   if [[ -x /opt/homebrew/bin/rg ]]; then
-    /opt/homebrew/bin/rg "$@"
+    /opt/homebrew/bin/rg --no-config "$@"
   elif [[ -x /usr/local/bin/rg ]]; then
-    /usr/local/bin/rg "$@"
+    /usr/local/bin/rg --no-config "$@"
   elif [[ -x /usr/bin/rg ]]; then
-    /usr/bin/rg "$@"
+    /usr/bin/rg --no-config "$@"
   else
     print -- "FAIL: rg is not installed"
     return 127
@@ -175,7 +177,7 @@ if /usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift
     note "PASS: product build has no fixture selftest and no dead self-test branch"
   fi
   repo_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist 2>/dev/null || true)"
-  bin_min="$(/usr/bin/vtool -show-build build/product-link/Shortcup 2>/dev/null | /usr/bin/awk '/minos/ { print $2; exit }' || true)"
+  bin_min="$(/usr/bin/vtool -show-build build/product-link/Shortcup 2>/dev/null | /usr/bin/python3 scripts/vtool-minos.py || true)"
   if [[ -n "$repo_min" && "$repo_min" == "$bin_min" ]]; then
     note "PASS: repo LSMinimumSystemVersion $repo_min matches the product-link binary"
   else
@@ -208,15 +210,14 @@ fi
 
 note ""
 note "LAYER 1 signing"
-if /bin/zsh -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
-  if /bin/zsh -f build.sh --dev > build/verify/dev-build.log 2>&1; then
+if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -- /bin/zsh -f setup-dev-signing.sh; then
+  if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/dev-build.log -- /bin/zsh -f build.sh --dev; then
     if /usr/bin/python3 scripts/check-dev-bundle.py --running "$DEV_APP"; then
       note "FAIL: Shortcup Dev build is already running. This script will not quit it or sign over it."
       fail=$((fail + 1))
-    elif /usr/bin/python3 scripts/keychain.py unlock "$KEYCHAIN" "$PW_FILE" \
-      && /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP" \
-        > build/verify/codesign-sign.log 2>&1; then
-      if ! /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN"; then
+    elif /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-unlock.log -- /usr/bin/python3 scripts/keychain.py unlock "$KEYCHAIN" "$PW_FILE" \
+      && /usr/bin/python3 scripts/run-deadline.py 120 build/verify/codesign-sign.log -- /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP"; then
+      if ! /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-lock.log -- /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN"; then
         note "FAIL: dev keychain did not lock"
         fail=$((fail + 1))
       fi
@@ -231,7 +232,7 @@ if /bin/zsh -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
         fail=$((fail + 1))
       fi
     else
-      /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN" || true
+      /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-lock-fail.log -- /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN" || true
       note "FAIL: codesign failed. See build/verify/codesign-sign.log"
       fail=$((fail + 1))
     fi
