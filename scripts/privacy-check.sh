@@ -113,11 +113,31 @@ elif [[ "$mode" != "all" ]]; then
   usage
 fi
 
-is_fixture() {
+# These exact paths are the self-test fixtures. A same-named file in any other
+# directory is still scanned. Skipping also requires the fake marker in the blob.
+fixture_marker="fake self-test fixture"
+
+exact_fixture_path() {
   case "$1" in
-    scripts/privacy-fixtures | scripts/privacy-fixtures/*) return 0 ;;
-    *) return 1 ;;
+    scripts/privacy-fixtures/fake-private-key.txt | \
+      scripts/privacy-fixtures/fake-user-path.txt | \
+      scripts/privacy-fixtures/fake-github-token.txt | \
+      scripts/privacy-fixtures/keychain-password | \
+      scripts/privacy-fixtures/clean-users-path.txt)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
   esac
+}
+
+blob_has_marker() {
+  local rev=$1 file=$2
+  if ! git cat-file -e "${rev}:${file}" 2>/dev/null; then
+    return 1
+  fi
+  git show "${rev}:${file}" | grep -F -q -- "$fixture_marker"
 }
 
 run_gitleaks() {
@@ -134,16 +154,26 @@ run_gitleaks() {
     exit 2
   fi
 
-  local report err code parsed
+  local report err code parsed scan_root archive
   report=$(mktemp)
   err=$(mktemp)
+  archive=""
+  scan_root=$repo
+  # Full mode scans the HEAD tree, not the working directory or gitignored files.
+  if [[ "$mode" != "range" ]]; then
+    archive=$(mktemp -d)
+    git archive HEAD | tar -x -C "$archive"
+    scan_root=$archive
+  fi
   cleanup() {
     rm -f "$report" "$err"
+    if [[ -n "$archive" ]]; then
+      rm -rf "$archive"
+    fi
   }
   trap cleanup EXIT
 
-  # Range mode scans every commit in base..head. Full-history mode scans the
-  # tree at HEAD only, so a path that was added and later removed is not a hit.
+  # Range mode scans every commit in base..head. Full mode scans the archived HEAD tree.
   local -a args=()
   if [[ "$mode" == "range" ]]; then
     args=(
@@ -167,13 +197,22 @@ run_gitleaks() {
       --report-format json
       --report-path "$report"
       --config "$config"
-      "$repo"
+      .
     )
   fi
 
   set +e
-  gitleaks "${args[@]}" >/dev/null 2>"$err"
-  code=$?
+  if [[ "$mode" == "range" ]]; then
+    gitleaks "${args[@]}" >/dev/null 2>"$err"
+    code=$?
+  else
+    # Scan from the archive root so reported paths stay repo-relative.
+    (
+      cd "$scan_root"
+      gitleaks "${args[@]}" >/dev/null 2>"$err"
+    )
+    code=$?
+  fi
   set -e
   if [[ "$code" -ne 0 && "$code" -ne 1 ]]; then
     echo "gitleaks-failed" >&2
@@ -181,7 +220,7 @@ run_gitleaks() {
   fi
 
   set +e
-  python3 - "$report" "$repo" << 'PY'
+  python3 - "$report" "$scan_root" << 'PY'
 import json
 import os
 import sys
@@ -259,15 +298,20 @@ warn_image() {
   esac
   ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
   case "$ext" in
-    png | jpg | jpeg | gif | heic | tiff | mov | mp4) ;;
+    png | jpg | jpeg | gif | heic | heif | tiff | webp | bmp | pdf | mov | mp4 | webm | mkv) ;;
     *) return 0 ;;
   esac
+  local safe
+  safe=${file//%/%25}
+  safe=${safe//$'\n'/%0A}
+  safe=${safe//$'\r'/%0D}
+  printf '%s\n' "::warning file=${safe}::Added file may contain screen contents. This warning does not fail the check." >&2
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
   if [[ "$summary_started" -eq 0 ]]; then
     printf '%s\n' "### Privacy scan warnings" >> "$GITHUB_STEP_SUMMARY"
     summary_started=1
   fi
-  printf '%s\n' "- Warning: \`${file}\` was added. Image and video files may contain screen contents. This warning does not fail the check." >> "$GITHUB_STEP_SUMMARY"
+  printf '%s\n' "- Warning: \`${file}\` was added. Image, video, and document files may contain screen contents. This warning does not fail the check." >> "$GITHUB_STEP_SUMMARY"
 }
 
 classify_name() {
@@ -297,7 +341,7 @@ fi
 
 found=0
 while IFS= read -r -d '' file; do
-  if is_fixture "$file"; then
+  if exact_fixture_path "$file" && blob_has_marker "$scan_rev" "$file"; then
     continue
   fi
 
@@ -346,54 +390,96 @@ while IFS= read -r -d '' file; do
   fi
 done < "$list_tmp"
 
-# Range mode also reads every commit patch. A path added and later removed is
-# still a finding. Only added lines count, so deleting one is not a finding.
+# Range mode reads every commit message and every added diff line. A path that
+# is added and later removed is still a finding. Deleted lines are not.
 if [[ "$mode" == "range" ]]; then
   diff_hits=$(
-    git log --reverse -m -U0 --no-color --format= "${range_base}..${range_head}" | awk '
-      function bad_home(text,    rest, name) {
-        rest = text
-        while (match(rest, /\/Users\/[A-Za-z0-9._-]+/)) {
-          name = substr(rest, RSTART + 7, RLENGTH - 7)
-          if (name != "runner" && name != "Shared") {
-            return 1
+    git rev-list --reverse "${range_base}..${range_head}" | while IFS= read -r commit; do
+      [[ -z "$commit" ]] && continue
+      skip_paths=""
+      for fixture in \
+        scripts/privacy-fixtures/fake-private-key.txt \
+        scripts/privacy-fixtures/fake-user-path.txt \
+        scripts/privacy-fixtures/fake-github-token.txt \
+        scripts/privacy-fixtures/keychain-password \
+        scripts/privacy-fixtures/clean-users-path.txt
+      do
+        if blob_has_marker "$commit" "$fixture"; then
+          skip_paths+="${fixture}"$'\n'
+        fi
+      done
+      # %B is the commit message. -p appends the patch, including ^+ lines.
+      git log -1 -m -p -U0 --no-color --format=%B "$commit" | awk -v commit="$commit" -v skip="$skip_paths" '
+        function bad_home(text,    rest, name) {
+          rest = text
+          while (match(rest, /\/Users\/[A-Za-z0-9._-]+/)) {
+            name = substr(rest, RSTART + 7, RLENGTH - 7)
+            if (name != "runner" && name != "Shared") {
+              return 1
+            }
+            rest = substr(rest, RSTART + RLENGTH)
           }
-          rest = substr(rest, RSTART + RLENGTH)
+          return 0
         }
-        return 0
-      }
-      function fixture(path) {
-        return path == "scripts/privacy-fixtures" || index(path, "scripts/privacy-fixtures/") == 1
-      }
-      /^diff --git / {
-        file = ""
-        newline = 0
-        next
-      }
-      /^\+\+\+ / {
-        file = substr($0, 5)
-        sub(/^b\//, "", file)
-        if (file == "/dev/null") {
+        function emit(where, lineno, text) {
+          if (bad_home(text)) {
+            print where ":" lineno " users-path"
+          }
+          if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) {
+            print where ":" lineno " private-key"
+          }
+          if (text ~ /ghp_[A-Za-z0-9]{36}/) {
+            print where ":" lineno " github-token"
+          }
+        }
+        function skipped(path,    n, i, parts) {
+          n = split(skip, parts, "\n")
+          for (i = 1; i <= n; i++) {
+            if (parts[i] == path) {
+              return 1
+            }
+          }
+          return 0
+        }
+        BEGIN { in_patch = 0; msgline = 0; file = ""; newline = 0 }
+        in_patch == 0 && /^diff --git / {
+          in_patch = 1
           file = ""
+          newline = 0
+          next
         }
-        next
-      }
-      /^@@ / {
-        if (match($0, /\+[0-9]+/)) {
-          newline = substr($0, RSTART + 1, RLENGTH - 1) + 0
+        in_patch == 0 {
+          msgline++
+          if ($0 != "") {
+            emit(commit, msgline, $0)
+          }
+          next
         }
-        next
-      }
-      /^\+/ {
-        if (file != "" && !fixture(file) && newline > 0 && bad_home(substr($0, 2))) {
-          print file ":" newline " users-path"
+        /^\+\+\+ / {
+          file = substr($0, 5)
+          sub(/^b\//, "", file)
+          if (file == "/dev/null") {
+            file = ""
+          }
+          next
         }
-        if (newline > 0) {
-          newline++
+        /^@@ / {
+          if (match($0, /\+[0-9]+/)) {
+            newline = substr($0, RSTART + 1, RLENGTH - 1) + 0
+          }
+          next
         }
-        next
-      }
-    '
+        /^\+/ {
+          if (file != "" && !skipped(file) && newline > 0) {
+            emit(file, newline, substr($0, 2))
+          }
+          if (newline > 0) {
+            newline++
+          }
+          next
+        }
+      '
+    done
   )
   if [[ -n "$diff_hits" ]]; then
     printf '%s\n' "$diff_hits"
@@ -401,10 +487,11 @@ if [[ "$mode" == "range" ]]; then
   fi
 
   added_tmp=$(mktemp)
-  git log --reverse --diff-filter=A --name-only --pretty=format: "${range_base}..${range_head}" > "$added_tmp"
+  # --no-renames reports a rename as a delete plus an add, so git mv notes.txt .env is visible.
+  git log --reverse --no-renames --diff-filter=A --name-only --pretty=format: "${range_base}..${range_head}" > "$added_tmp"
   while IFS= read -r file; do
     [[ -z "$file" ]] && continue
-    if is_fixture "$file"; then
+    if exact_fixture_path "$file"; then
       continue
     fi
     rule=$(classify_name "${file##*/}")

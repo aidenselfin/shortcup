@@ -22,5 +22,11 @@ regexes = [
 ]
 
 [allowlist]
-description = "Obvious self-test fixtures. Copies outside this path must still be detected."
-paths = ['''(?:^|/)scripts/privacy-fixtures(?:/|$)''']
+description = "Exact self-test fixture paths only. Each file contains the marker 'fake self-test fixture'."
+paths = [
+  '''^(?:\./)?scripts/privacy-fixtures/fake-private-key\.txt$''',
+  '''^(?:\./)?scripts/privacy-fixtures/fake-user-path\.txt$''',
+  '''^(?:\./)?scripts/privacy-fixtures/fake-github-token\.txt$''',
+  '''^(?:\./)?scripts/privacy-fixtures/keychain-password$''',
+  '''^(?:\./)?scripts/privacy-fixtures/clean-users-path\.txt$''',
+]

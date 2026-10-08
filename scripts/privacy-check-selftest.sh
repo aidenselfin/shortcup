@@ -5,6 +5,19 @@ export LC_ALL=C
 
 root=$(git rev-parse --show-toplevel)
 check="$root/scripts/privacy-check.sh"
+marker="fake self-test fixture"
+for fixture in \
+  scripts/privacy-fixtures/fake-private-key.txt \
+  scripts/privacy-fixtures/fake-user-path.txt \
+  scripts/privacy-fixtures/fake-github-token.txt \
+  scripts/privacy-fixtures/keychain-password \
+  scripts/privacy-fixtures/clean-users-path.txt
+do
+  if ! grep -F -q -- "$marker" "$root/$fixture"; then
+    echo "missing-fake-marker" >&2
+    exit 1
+  fi
+done
 
 if ! command -v gitleaks >/dev/null 2>&1; then
   echo "gitleaks-not-found" >&2
@@ -116,15 +129,25 @@ git -C "$range_repo" config user.email "privacy-selftest@example.invalid"
 git -C "$range_repo" config user.name "privacy-selftest"
 git -C "$range_repo" config commit.gpgsign false
 printf '%s\n' "ok" > "$range_repo/ok.txt"
-git -C "$range_repo" add ok.txt
+printf '%s\n' "notes" > "$range_repo/notes.txt"
+git -C "$range_repo" add ok.txt notes.txt
 git -C "$range_repo" commit -q -m "base"
 range_base=$(git -C "$range_repo" rev-parse HEAD)
+mkdir -p "$range_repo/scripts/privacy-fixtures/nested"
 cp "$root/scripts/privacy-fixtures/fake-user-path.txt" "$range_repo/added-path.txt"
+cp "$root/scripts/privacy-fixtures/fake-user-path.txt" "$range_repo/scripts/privacy-fixtures/fake-user-path.txt"
+cp "$root/scripts/privacy-fixtures/fake-user-path.txt" "$range_repo/scripts/privacy-fixtures/nested/extra.txt"
 printf '%s\n' "not-a-screenshot" > "$range_repo/shot.png"
 printf '%s\n' "placeholder" > "$range_repo/.env.local"
-git -C "$range_repo" add added-path.txt shot.png .env.local
-git -C "$range_repo" commit -q -m "add fakes"
-git -C "$range_repo" rm -q -- added-path.txt shot.png .env.local
+git -C "$range_repo" add added-path.txt shot.png .env.local scripts
+git -C "$range_repo" mv notes.txt .env
+path_line=$(grep -F '/Users/' "$root/scripts/privacy-fixtures/fake-user-path.txt" | head -n 1)
+git -C "$range_repo" commit -q -F - <<EOF
+add fakes
+${path_line}
+EOF
+add_commit=$(git -C "$range_repo" rev-parse HEAD)
+git -C "$range_repo" rm -q -- added-path.txt shot.png .env.local .env scripts/privacy-fixtures/fake-user-path.txt scripts/privacy-fixtures/nested/extra.txt
 git -C "$range_repo" commit -q -m "remove fakes"
 range_head=$(git -C "$range_repo" rev-parse HEAD)
 summary="$tmp/summary"
@@ -140,8 +163,19 @@ range_all_gl=$(bash "$check" --repo "$range_repo" --all --gitleaks --config "$ro
 range_all_gl_code=$?
 set -e
 
-if [[ -s "$tmp/range.err" || -s "$tmp/range-gl.err" || -s "$tmp/range-all.err" || -s "$tmp/range-all-gl.err" ]]; then
+if [[ -s "$tmp/range-gl.err" || -s "$tmp/range-all.err" || -s "$tmp/range-all-gl.err" ]]; then
   echo "range-stderr" >&2
+  exit 1
+fi
+while IFS= read -r line; do
+  [[ -z "$line" ]] && continue
+  if [[ ! "$line" =~ ^::warning\ file=.+:: ]]; then
+    echo "range-stderr" >&2
+    exit 1
+  fi
+done < "$tmp/range.err"
+if ! grep -F -q "file=shot.png" "$tmp/range.err"; then
+  echo "missing-warning-annotation" >&2
   exit 1
 fi
 if [[ "$range_code" -ne 1 || "$range_gl_code" -ne 1 ]]; then
@@ -158,7 +192,15 @@ assert_no_raw_fixture "$range_out"
 assert_no_raw_fixture "$range_gl"
 require_finding "$range_out" "added-path.txt" "users-path"
 require_finding "$range_out" ".env.local" "forbidden-filename"
+require_finding "$range_out" ".env" "forbidden-filename"
+require_finding "$range_out" "scripts/privacy-fixtures/nested/extra.txt" "users-path"
+require_finding "$range_out" "$add_commit" "users-path"
 require_finding "$range_gl" "added-path.txt" "macos-user-path"
+require_finding "$range_gl" "scripts/privacy-fixtures/nested/extra.txt" "macos-user-path"
+if printf '%s\n' "$range_out" "$range_gl" | grep -F -q "scripts/privacy-fixtures/fake-user-path.txt"; then
+  echo "exact-fixture-was-scanned" >&2
+  exit 1
+fi
 if [[ ! -f "$summary" ]] || ! grep -F -q "shot.png" "$summary" || ! grep -F -q "Warning:" "$summary"; then
   echo "missing-image-warning" >&2
   exit 1
