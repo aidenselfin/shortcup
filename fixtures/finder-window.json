@@ -1,0 +1,26 @@
+{
+  "bundleID": "com.apple.finder",
+  "appName": "Finder",
+  "pid": 200,
+  "languages": ["ko"],
+  "elements": {
+    "app": {"AXRole": "AXApplication", "AXMenuBar": "menubar", "AXChildren": ["menubar"]},
+    "menubar": {"AXRole": "AXMenuBar", "AXChildren": ["window-item"]},
+    "window-item": {"AXRole": "AXMenuBarItem", "AXTitle": "윈도우", "AXChildren": ["window-menu"]},
+    "window-menu": {"AXRole": "AXMenu", "AXChildren": ["close-item", "min-item", "fs-item", "history-item"]},
+    "close-item": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "윈도우 닫기", "AXMenuItemCmdChar": "w", "AXMenuItemCmdModifiers": 0, "AXMenuItemCmdVirtualKey": 13, "AXMenuItemCmdGlyph": 0, "AXChildren": []},
+    "min-item": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "최소화", "AXMenuItemCmdChar": "m", "AXMenuItemCmdModifiers": 0, "AXMenuItemCmdVirtualKey": 46, "AXMenuItemCmdGlyph": 0, "AXChildren": []},
+    "fs-item": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "전체 화면 시작", "AXMenuItemCmdChar": "f", "AXMenuItemCmdModifiers": 4, "AXMenuItemCmdVirtualKey": 3, "AXMenuItemCmdGlyph": 0, "AXChildren": []},
+    "history-item": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "방문 기록", "AXChildren": ["history-menu"]},
+    "history-menu": {"AXRole": "AXMenu", "AXChildren": ["history-entry"]},
+    "history-entry": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "history-entry", "AXMenuItemCmdChar": "h", "AXMenuItemCmdModifiers": 0, "AXChildren": []},
+    "window": {"AXRole": "AXWindow", "AXSubrole": "AXStandardWindow", "AXTitle": "", "AXParent": "app", "AXCloseButton": "btn-close", "AXMinimizeButton": "btn-min", "AXFullScreenButton": "btn-fs", "AXZoomButton": "btn-zoom", "AXChildren": ["btn-close", "btn-min", "btn-fs", "btn-zoom", "btn-new", "btn-back", "field"]},
+    "btn-close": {"AXRole": "AXButton", "AXSubrole": "AXCloseButton", "AXParent": "window"},
+    "btn-min": {"AXRole": "AXButton", "AXSubrole": "AXMinimizeButton", "AXParent": "window"},
+    "btn-fs": {"AXRole": "AXButton", "AXSubrole": "AXFullScreenButton", "AXParent": "window"},
+    "btn-zoom": {"AXRole": "AXButton", "AXSubrole": "AXZoomButton", "AXParent": "window"},
+    "btn-new": {"AXRole": "AXButton", "AXTitle": "New Tab", "AXParent": "window"},
+    "btn-back": {"AXRole": "AXButton", "AXTitle": "Back", "AXParent": "window"},
+    "field": {"AXRole": "AXTextField", "AXValue": "field-text", "AXParent": "window"}
+  }
+}
