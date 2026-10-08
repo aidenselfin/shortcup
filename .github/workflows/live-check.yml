@@ -1,0 +1,199 @@
+# Trial: is a process started from bash Accessibility-trusted on a GitHub macos-26 runner?
+# Live fixture and selftest launch stay off until the PR #2 safety fixes are in this tree.
+# Pull requests and manual runs only. No fork-target trigger.
+# No GitHub Secrets, no dev certificate, no keychain, no TCC database edits.
+
+name: live-check
+
+on:
+  pull_request:
+    branches:
+      - cursor/fast-verify-ebd9
+    paths:
+      - "Sources/**"
+      - "Fixture/**"
+      - "verify.sh"
+      - ".github/workflows/live-check.yml"
+      - "scripts/ax-trust-probe.swift"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  live:
+    name: macos-26 trust probe
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Print macOS version and arch
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          echo "runner_macos_product=$(sw_vers -productName)"
+          echo "runner_macos_version=$(sw_vers -productVersion)"
+          echo "runner_macos_build=$(sw_vers -buildVersion)"
+          echo "runner_arch=$(uname -m)"
+          echo "runner_shell=$(ps -p $$ -o comm= | tr -d '[:space:]')"
+
+      - name: Accessibility trust probe
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          echo "probe_parent=$(ps -p $$ -o comm= | tr -d '[:space:]')"
+          sdk="$(xcrun --show-sdk-path)"
+          bin="${RUNNER_TEMP}/ax-trust-probe"
+          swiftc -sdk "$sdk" -framework ApplicationServices -o "$bin" scripts/ax-trust-probe.swift
+          out="${RUNNER_TEMP}/ax-trust.txt"
+          # Direct exec from this bash step. Not `open`.
+          "$bin" | tee "$out"
+          trusted="$(awk -F= '/^trusted=/{print $2; exit}' "$out" | tr -d '[:space:]')"
+          case "$trusted" in
+            true|false) ;;
+            *)
+              echo "probe did not report trusted=true or trusted=false"
+              exit 1
+              ;;
+          esac
+          echo "ax_trusted=${trusted}" >> "$GITHUB_ENV"
+          echo "ax_trusted=${trusted}"
+          if [[ "$trusted" == "false" ]]; then
+            echo "early_exit=before_fixture_build"
+          fi
+
+      - name: Write skipped result
+        if: env.ax_trusted == 'false'
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          printf '%s\n' '{"cases":[],"result":"skipped","trusted":false}' > build/verify/selftest.json
+          echo "selftest_result=skipped"
+          echo "selftest_cases=none"
+          echo "note=Accessibility was not trusted, so the fixture was not built and the selftest did not run"
+
+      - name: Build dev app with ad-hoc signature
+        if: env.ax_trusted == 'true'
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          # Existing build script only. It compiles and runs the command-line checks.
+          # It does not launch Shortcup Dev or the fixture.
+          zsh build.sh --dev
+          codesign --force -s - --identifier com.shortcup.dev "build/Shortcup Dev.app"
+          sig="$(codesign -dv "build/Shortcup Dev.app" 2>&1 || true)"
+          echo "$sig"
+          if echo "$sig" | grep -q 'Authority='; then
+            echo "refusing a certificate signature"
+            exit 1
+          fi
+          if ! echo "$sig" | grep -q 'Signature=adhoc'; then
+            echo "expected an ad-hoc signature"
+            exit 1
+          fi
+          echo "dev_binary=built_not_launched"
+          echo "live_launch=withheld"
+          echo "selftest_result=pending PR #2 fixes"
+          echo "note=PR #2 safety fixes are not in this tree, so the fixture and dev binaries were not started"
+
+      - name: Record selftest pending
+        if: env.ax_trusted == 'true'
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          printf '%s\n' '{"cases":[],"result":"pending PR #2 fixes","trusted":true}' > build/verify/selftest.json
+
+      - name: JSON allow-list and canary scan
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-selftest-json.py build/verify/selftest.json
+          canary="SCX-$(openssl rand -hex 4)"
+          umask 077
+          canary_file="$(mktemp)"
+          printf '%s' "$canary" > "$canary_file"
+          chmod 600 "$canary_file"
+          if grep -a -F -q "$canary" build/verify/selftest.json; then
+            echo "CRITICAL: canary text is in the result JSON"
+            exit 1
+          fi
+          if grep -a -F -q 'SCX-' build/verify/selftest.json; then
+            echo "CRITICAL: result JSON contains a canary-like token"
+            exit 1
+          fi
+          rm -f "$canary_file"
+          bytes="$(wc -c < build/verify/selftest.json | tr -d '[:space:]')"
+          if [[ "$bytes" -gt 8192 ]]; then
+            echo "CRITICAL: result JSON is unexpectedly large (${bytes} bytes)"
+            exit 1
+          fi
+          echo "canary_scan=pass"
+          echo "result_json_bytes=${bytes}"
+          python3 -c 'import json; d=json.load(open("build/verify/selftest.json")); print("report_trusted=" + ("true" if d["trusted"] else "false")); print("report_result=" + str(d["result"])); print("report_cases=" + str(len(d["cases"]))); [print("report_case=" + str(i) + " result=" + str(c.get("result"))) for i, c in enumerate(d["cases"])]'
+          echo "result_json_begin"
+          cat build/verify/selftest.json
+          echo
+          echo "result_json_end"
+          {
+            echo "### Live check"
+            echo
+            echo '```'
+            echo "runner_macos_version=$(sw_vers -productVersion)"
+            echo "runner_arch=$(uname -m)"
+            echo "ax_trusted=${ax_trusted}"
+            cat build/verify/selftest.json
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload result JSON
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: selftest-result
+          path: build/verify/selftest.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          include-hidden-files: false
+
+      - name: Kill fixture and dev processes
+        if: always()
+        timeout-minutes: 1
+        run: |
+          set +e
+          root="${GITHUB_WORKSPACE}/build/"
+          echo "kill_root=${root}"
+          ps -ax -o pid=,command= | while IFS= read -r line; do
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            trimmed="${line#"${line%%[![:space:]]*}"}"
+            pid="${trimmed%% *}"
+            command="${trimmed#"$pid"}"
+            command="${command#"${command%%[![:space:]]*}"}"
+            case "$pid" in
+              ''|*[!0-9]*) continue ;;
+            esac
+            case "$command" in
+              "$root"*)
+                echo "killing pid=${pid}"
+                kill "$pid" 2>/dev/null || true
+                ;;
+            esac
+          done
+          exit 0
