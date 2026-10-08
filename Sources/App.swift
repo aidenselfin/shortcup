@@ -439,9 +439,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         panel.contentView = backdrop
     }
 
+    #if SHORTCUP_CHECKS || SHORTCUP_DEV
     func setMonitorErrorForTesting(_ message: String?) { monitorError = message }
+    func takeMonitorErrorForTesting() -> String? { takeMonitorError() }
+    #endif
 
-    func takeMonitorError() -> String? {
+    private func takeMonitorError() -> String? {
         defer { monitorError = nil }
         return monitorError
     }

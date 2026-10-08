@@ -130,9 +130,6 @@ final class DevSelfTest {
         }
         let closeShortcut = menuShortcut(in: ax, identifier: nil, title: "윈도우 닫기") ?? ""
         let miniShortcut = menuShortcut(in: ax, identifier: "performMiniaturize:", title: nil) ?? ""
-        fixtureFrames = windows.compactMap { frame(of: $0) }.map {
-            ClickFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height)
-        }
         var cases: [[String: String]] = []
         cases.append(await expect(point: buttonPoint(standard, "AXCloseButton"), pid: fixture.processIdentifier, subrole: "AXCloseButton", identifier: "", shortcut: closeShortcut, hinted: true))
         let firstWalks = listener.session.menuWalks
@@ -171,7 +168,6 @@ final class DevSelfTest {
         let casesOK = cases.allSatisfy { $0["result"] == "pass" }
         let ok = casesOK && walksOK && hangOK && idle == 0 && !leaked && disallowed.isEmpty && log.titleFallbackCount > 0
         return [
-            "trusted": true,
             "result": ok ? "pass" : "fail",
             "cases": cases,
             "titleFallbackReads": log.titleFallbackCount,
@@ -237,24 +233,38 @@ final class DevSelfTest {
         return row(subrole: subrole, identifier: identifier, shortcut: pass ? shortcut : got, result: pass ? "pass" : "fail")
     }
 
-    // System-wide pid first. A mismatch returns nil and does not read the scoped element or any attribute.
-    func permit(_ point: CGPoint, pid: pid_t, subrole: String) -> ClickPermission? {
+    // Frames are read again on every call, because a fixture window can move between checks.
+    // System-wide pid first. A mismatch returns .skip and does not read the scoped element or any attribute.
+    // The click decision uses the subrole of the element actually at the point, not the expected one.
+    func permit(_ point: CGPoint, pid: pid_t, subrole _: String) -> ClickPermission? {
         guard NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == fixtureBundleID else { return nil }
         let click = ClickPoint(x: point.x, y: point.y)
+        fixtureFrames = currentFixtureFrames(pid: pid)
         guard fixtureFrames.contains(where: { $0.contains(click) }) else { return .skip }
-        let system = pidOfHit(on: AXUIElementCreateSystemWide(), at: point)
-        guard readsScopedHit(systemPID: system, fixturePID: pid) else { return .skip }
-        let scoped = pidOfHit(on: AXUIElementCreateApplication(pid), at: point)
-        return clickPermission(point: click, frames: fixtureFrames, systemPID: system, scopedPID: scoped, fixturePID: pid, subrole: subrole)
+        let system = hit(on: AXUIElementCreateSystemWide(), at: point)
+        guard readsScopedHit(systemPID: system?.pid, fixturePID: pid) else { return .skip }
+        let scoped = hit(on: AXUIElementCreateApplication(pid), at: point)
+        guard let scoped, scoped.pid == pid else { return .skip }
+        AXUIElementSetMessagingTimeout(scoped.element, axMessagingTimeout)
+        let actual = string(scoped.element, AXAttr.subrole)
+        return clickPermission(point: click, frames: fixtureFrames, systemPID: system?.pid, scopedPID: scoped.pid, fixturePID: pid, subrole: actual)
     }
 
-    func pidOfHit(on root: AXUIElement, at point: CGPoint) -> pid_t? {
+    func currentFixtureFrames(pid: pid_t) -> [ClickFrame] {
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, axMessagingTimeout)
+        return (elements(app, "AXWindows") ?? []).compactMap { frame(of: $0) }.map {
+            ClickFrame(x: $0.minX, y: $0.minY, width: $0.width, height: $0.height)
+        }
+    }
+
+    func hit(on root: AXUIElement, at point: CGPoint) -> (element: AXUIElement, pid: pid_t)? {
         AXUIElementSetMessagingTimeout(root, axMessagingTimeout)
-        var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &hit) == .success, let hit else { return nil }
+        var found: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(root, Float(point.x), Float(point.y), &found) == .success, let found else { return nil }
         var owner: pid_t = 0
-        guard AXUIElementGetPid(hit, &owner) == .success else { return nil }
-        return owner
+        guard AXUIElementGetPid(found, &owner) == .success else { return nil }
+        return (found, owner)
     }
 
     func frame(of element: AXUIElement) -> CGRect? {
@@ -292,16 +302,6 @@ final class DevSelfTest {
 
     func post(_ point: CGPoint, _ type: CGEventType) {
         CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left)?.post(tap: .cghidEventTap)
-    }
-
-    func pidAt(_ point: CGPoint) -> pid_t? {
-        let system = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(system, axMessagingTimeout)
-        var hit: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit else { return nil }
-        var pid: pid_t = 0
-        guard AXUIElementGetPid(hit, &pid) == .success else { return nil }
-        return pid
     }
 
     func string(_ element: AXUIElement, _ name: String) -> String {
