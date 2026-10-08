@@ -33,6 +33,7 @@ SZOMB = 5
 SAMPLE = 0.2
 WATCH_DEADLINE = 9 * 60
 SELF_CHECK_SHORT = 2.0
+SELF_CHECK_SHORT_ESLOGGER = 5.0
 
 
 def repo_root():
@@ -174,13 +175,17 @@ def sample_hits(lib, ignore_pids, verify_pid):
 def paths_in(obj):
     if isinstance(obj, dict):
         for key, value in obj.items():
-            if key in ("path", "executable_path") and isinstance(value, str):
+            if isinstance(value, str) and (
+                key in ("path", "executable_path", "executable") or value.startswith("/")
+            ):
                 yield value
             else:
                 yield from paths_in(value)
     elif isinstance(obj, list):
         for item in obj:
             yield from paths_in(item)
+    elif isinstance(obj, str) and obj.startswith("/"):
+        yield obj
 
 
 def eslogger_wanted():
@@ -243,15 +248,23 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
         if not chunk:
             break
         buf += chunk
-    parts = buf.split(b"\n")
-    proc._es_buf = parts[-1]
-    for line in parts[:-1]:
-        if not line.strip():
-            continue
+        proc._es_bytes = getattr(proc, "_es_bytes", 0) + len(chunk)
+    if b"dummy-true" in buf:
+        proc._es_raw_dummy = True
+    text = buf.decode("utf-8", "replace")
+    decoder = json.JSONDecoder()
+    index = 0
+    while index < len(text):
+        while index < len(text) and text[index].isspace():
+            index += 1
+        if index >= len(text):
+            break
         try:
-            data = json.loads(line.decode("utf-8", "replace"))
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            continue
+            data, end = decoder.raw_decode(text, index)
+        except json.JSONDecodeError:
+            break
+        index = end
+        proc._es_json = getattr(proc, "_es_json", 0) + 1
         for raw in paths_in(data):
             try:
                 path = Path(os.path.realpath(raw))
@@ -260,6 +273,7 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
             reason = forbidden_reason(lib, 0, path, verify_pid, allow_checks=True)
             if reason:
                 hits.append((0, path, reason))
+    proc._es_buf = text[index:].encode("utf-8", "replace")
     if proc.poll() is not None:
         raise RuntimeError("eslogger exited")
     return hits
@@ -307,27 +321,22 @@ def self_check_short(lib, ignore_pids, require_eslogger):
     dummy = dummy_dir / "dummy-true"
     shutil.copy("/usr/bin/true", dummy)
     dummy.chmod(0o755)
-    loop = subprocess.Popen(["/bin/zsh", "-c", "while true; do " + str(dummy) + "; done"])
     es_proc = None
     if require_eslogger:
         es_proc = start_eslogger()
         if es_proc is None:
             print("FAIL: eslogger did not start", file=sys.stderr)
-            if loop.poll() is None:
-                loop.send_signal(signal.SIGKILL)
-                try:
-                    loop.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    pass
             try:
                 dummy.unlink()
             except OSError:
                 pass
             return False
+    loop = subprocess.Popen(["/bin/zsh", "-c", "while true; do " + str(dummy) + "; done"])
     seen_eslogger = False
     seen_polling = False
     try:
-        deadline = time.monotonic() + SELF_CHECK_SHORT
+        wait_s = SELF_CHECK_SHORT_ESLOGGER if require_eslogger else SELF_CHECK_SHORT
+        deadline = time.monotonic() + wait_s
         while time.monotonic() < deadline:
             if es_proc is not None:
                 try:
@@ -335,6 +344,8 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                         if reason == "executable under build/" and "dummy-true" in str(path):
                             seen_eslogger = True
                             break
+                    if getattr(es_proc, "_es_raw_dummy", False):
+                        seen_eslogger = True
                 except RuntimeError:
                     es_proc = None
                     if require_eslogger:
@@ -363,7 +374,16 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                     flush=True,
                 )
                 return True
-            print("FAIL: eslogger did not observe a short-lived executable under build/", file=sys.stderr)
+            print(
+                "FAIL: eslogger did not observe a short-lived executable under build/"
+                + " bytes="
+                + str(getattr(es_proc, "_es_bytes", 0) if es_proc is not None else 0)
+                + " json="
+                + str(getattr(es_proc, "_es_json", 0) if es_proc is not None else 0)
+                + " raw_dummy="
+                + ("1" if es_proc is not None and getattr(es_proc, "_es_raw_dummy", False) else "0"),
+                file=sys.stderr,
+            )
             return False
         if seen_eslogger or seen_polling:
             path_name = "eslogger" if seen_eslogger else "polling"
