@@ -287,6 +287,16 @@ def copy_identities(keychain):
 def acl_set_partition_ids():
     func = getattr(Security, "SecACLSetPartitionIDs", None)
     if func is None:
+        try:
+            libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+            libc.dlsym.restype = ctypes.c_void_p
+            libc.dlsym.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+            addr = libc.dlsym(ctypes.c_void_p(Security._handle), b"SecACLSetPartitionIDs")
+            if addr:
+                func = ctypes.CFUNCTYPE(ctypes.c_int32, ctypes.c_void_p, ctypes.c_void_p)(addr)
+        except (OSError, AttributeError, TypeError):
+            func = None
+    if func is None:
         return None
     func.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
     func.restype = ctypes.c_int32

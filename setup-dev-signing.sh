@@ -28,7 +28,7 @@ append_search_list() {
     [[ -z "$trimmed" || "$trimmed" == "$KEYCHAIN" ]] && continue
     [[ -f "$trimmed" ]] && cleaned+=("$trimmed")
   done < <(/usr/bin/security list-keychains -d user)
-  /usr/bin/security list-keychains -d user -s "${cleaned[@]}" "$KEYCHAIN"
+  /usr/bin/security list-keychains -d user -s "$KEYCHAIN" "${cleaned[@]}"
 }
 
 remove_from_search_list() {
@@ -132,6 +132,8 @@ EOF
     /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN" || true
     exit 1
   fi
+  parts="$(/usr/bin/security dump-keychain "$KEYCHAIN" 2>/dev/null | /usr/bin/grep -c partitionID || true)"
+  print -- "partition-ids=${parts:-0}"
   /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN"
   /bin/rm -rf "$work"
   trap - EXIT

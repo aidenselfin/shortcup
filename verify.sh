@@ -223,7 +223,12 @@ if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -
       note "FAIL: Shortcup Dev build is already running. This script will not quit it or sign over it."
       fail=$((fail + 1))
     elif /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-unlock.log -- /usr/bin/python3 scripts/keychain.py unlock "$KEYCHAIN" "$PW_FILE" \
-      && /usr/bin/python3 scripts/run-deadline.py 120 build/verify/codesign-sign.log -- /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP"; then
+      && {
+        if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
+          /usr/bin/security default-keychain -s "$KEYCHAIN" || true
+        fi
+        /usr/bin/python3 scripts/run-deadline.py 120 build/verify/codesign-sign.log -- /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP"
+      }; then
       if ! /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-lock.log -- /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN"; then
         note "FAIL: dev keychain did not lock"
         fail=$((fail + 1))
