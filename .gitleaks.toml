@@ -9,24 +9,85 @@ description = "keychain password file"
 path = '''(?:^|/)keychain-password$'''
 
 [[rules]]
+id = "forbidden-filename"
+description = "signing, keychain, environment, or Xcode user files"
+path = '''(?i)(?:\.(?:p12|pem|key|cer|p8|pfx|mobileprovision|provisionprofile|keychain|keychain-db|certsigningrequest)$|(?:^|/)\.env(?:\..*)?$|(?:^|/)xcuserdata/|(?:^|/)\.config/shortcup/|(?:^|/)validation-(?:events|state|results)[^/]*$|(?:^|/)validation-fixtures/)'''
+
+# Home directories in any spelling: /Users/x, \/Users\/x (JSON), /users/x, C:\Users\x,
+# and non-ASCII names. Only runner and Shared are allowed. The secret group leaves out
+# the leading slash so the default config's allowlist for plain Unix paths never applies.
+[[rules]]
 id = "macos-user-path"
-description = "macOS home directory other than runner or Shared"
-regex = '''/Users/[A-Za-z0-9._-]+'''
-keywords = ["Users"]
+description = "home directory other than runner or Shared"
+regex = '''(?i)[/\\]+(users[/\\]+[^\s/\\"'<>:;,|(){}*$?=&#%!@+~\x60\[]+)'''
+secretGroup = 1
+keywords = ["users"]
 
 [[rules.allowlists]]
 regexTarget = "match"
 regexes = [
-  '''/Users/runner(?:/|$)''',
-  '''/Users/Shared(?:/|$)''',
+  '''(?i)[/\\]+users[/\\]+(?:runner|shared)\.*$''',
+  '''(?i)[/\\]+users[/\\]+\.+$''',
 ]
 
-[allowlist]
-description = "Exact self-test fixture paths only. Each file contains the marker 'fake self-test fixture'."
+[[rules]]
+id = "home-path"
+description = "Linux home directory other than runner"
+regex = '''(?i)[/\\]+(home[/\\]+[^\s/\\"'<>:;,|(){}*$?=&#%!@+~\x60\[]+)'''
+secretGroup = 1
+keywords = ["home"]
+
+[[rules.allowlists]]
+regexTarget = "match"
+regexes = [
+  '''(?i)[/\\]+home[/\\]+runner\.*$''',
+  '''(?i)[/\\]+home[/\\]+\.+$''',
+]
+
+[[rules]]
+id = "owner-device"
+description = "owner name followed by a device name"
+regex = '''(?:의|'s|’s) (?:Mac|MacBook|iMac|iPhone|iPad)'''
+keywords = ["mac", "iphone", "ipad"]
+
+# Self-test fixtures: exact path and the fake marker on the same line. Same rule as
+# scripts/privacy-check.sh.
+[[allowlists]]
+description = "self-test fixture lines"
+condition = "AND"
+regexTarget = "line"
+regexes = ['''fake self-test fixture''']
 paths = [
   '''^(?:\./)?scripts/privacy-fixtures/fake-private-key\.txt$''',
   '''^(?:\./)?scripts/privacy-fixtures/fake-user-path\.txt$''',
-  '''^(?:\./)?scripts/privacy-fixtures/fake-github-token\.txt$''',
-  '''^(?:\./)?scripts/privacy-fixtures/keychain-password$''',
+  '''^(?:\./)?scripts/privacy-fixtures/fake-device-name\.txt$''',
   '''^(?:\./)?scripts/privacy-fixtures/clean-users-path\.txt$''',
+]
+
+# The first commits of this check had the marker only once per fixture file.
+[[allowlists]]
+description = "fixtures in the first commits of this check"
+condition = "AND"
+commits = [
+  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
+  "2542ec18fff050c167074836f8120369f5cd28d0",
+]
+paths = ['''^scripts/privacy-fixtures/(?:fake-private-key\.txt|fake-user-path\.txt|fake-github-token\.txt|keychain-password|clean-users-path\.txt|macos-user-path\.toml)$''']
+
+# Public history from before this check. Pinned to commit and rule.
+[[allowlists]]
+description = "historical home paths"
+targetRules = ["macos-user-path"]
+commits = [
+  "d8001e780038c391f69367999cc41cbe9336dafa",
+  "6ef593ad25b96559b67dde593ffc5bd978689d16",
+]
+
+[[allowlists]]
+description = "historical device phrase"
+targetRules = ["owner-device"]
+commits = [
+  "ae5c13d06ac9670c96955ece48257abdf88b9e84",
+  "f7c8745f7cc94f03a33b3df5167a1f76ee8dcfa1",
+  "c5e8e8b546bd72ae9211f84afb922d09c72cbc48",
 ]

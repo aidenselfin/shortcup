@@ -45,3 +45,19 @@ open -n build/Shortcup.app --args --validate-once
 이미 실행 중인 Shortcup은 먼저 메뉴 막대에서 종료하세요. 검증 모드만 CGEvent로 실제 클릭과 단축키를 보냅니다. 일반 실행에는 입력 생성이 없습니다. 검증 파일은 `build/validation-fixtures`에 생성하며 결과는 `build/validation-results.json`, 힌트는 `build/validation-events.jsonl`, 상태는 `build/validation-state.json`에 남습니다. 검증 기록에는 명령 이름과 단축키만 들어갑니다. `build/validation-enabled`를 삭제하면 일반 실행의 진단 기록을 중단합니다.
 
 고정 범위와 완료 기준은 [PLAN.md](PLAN.md), 실제 검증 결과는 [VALIDATION.md](VALIDATION.md)를 참조하세요.
+
+## 개인정보 검사
+
+GitHub Actions의 `privacy-scan`이 모든 push와 PR에서 개인 경로, 키·인증서 파일, 토큰을 검사합니다. 결과에는 파일·줄·규칙만 남습니다.
+
+푸시 전에 같은 검사를 로컬에서 돌리려면 이 저장소에만 pre-push 훅을 설치하세요. 전역 git 설정은 바꾸지 않습니다.
+
+```sh
+cd ~/shortcup
+bash scripts/install-pre-push-hook.sh
+```
+
+- 훅은 푸시하는 커밋만 검사합니다. 작업 폴더는 보지 않으며, `scripts/`가 없는 브랜치에서도 동작합니다.
+- 기존 pre-push 훅이 있으면 설치를 멈춥니다. 바꾸려면 `--force`를 붙이세요.
+- [gitleaks](https://github.com/gitleaks/gitleaks)가 필요합니다. 없으면 푸시를 거부합니다. 잠시 건너뛰려면 `SHORTCUP_PRIVACY_SKIP_GITLEAKS=1 git push`를 쓰세요. 경고가 출력됩니다.
+- 검사 스크립트를 고친 뒤에는 `--force`로 다시 설치하세요.

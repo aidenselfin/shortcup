@@ -1,3 +1,8 @@
 # fake self-test fixture
 /Users/runner/work/shortcup
 /Users/Shared/data
+\/Users\/runner\/work
+/home/runner/work
+/Users/<name>/example
+cd ~/shortcup
+개발용 Mac(macOS 26.6.2) 덤프:

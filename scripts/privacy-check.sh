@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
 # Shared privacy check for the workflow and the optional pre-push hook.
-# Prints "path:line rule" and nothing from the matched line.
-# Exit 0 clean, 1 findings, 2 usage or tool failure.
+# Prints "path:line rule" (or "commit:line rule" for commit messages) and nothing
+# from the matched text. Exit 0 clean, 1 findings, 2 usage, bad revision, or tool failure.
+# Must run on bash 3.2 and the awk shipped with macOS.
 set -euo pipefail
 export LC_ALL=C
 
 usage() {
-  echo "usage: privacy-check.sh [--repo DIR] [--gitleaks] [--config FILE] (--all | --range BASE HEAD | --ci)" >&2
+  cat >&2 << 'EOF'
+usage: privacy-check.sh [--repo DIR] [--gitleaks] [--config FILE] [--tree REV] MODE
+modes:
+  --all                     files in HEAD; with --gitleaks also every commit on every ref
+  --range BASE HEAD         commits BASE..HEAD, files changed in BASE...HEAD
+  --new-branch HEAD REMOTE  commits in HEAD not on REMOTE, every file in HEAD
+  --ci                      choose a mode from the GitHub Actions event
+--tree REV reads file contents from REV instead of HEAD of the mode.
+--gitleaks runs gitleaks instead of the built-in check.
+EOF
   exit 2
 }
 
@@ -14,8 +24,10 @@ repo=""
 use_gitleaks=0
 config=""
 mode=""
-range_base=""
-range_head=""
+arg_base=""
+arg_head=""
+arg_remote=""
+tree_override=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +45,11 @@ while [[ $# -gt 0 ]]; do
       config=$2
       shift 2
       ;;
+    --tree)
+      [[ $# -ge 2 ]] || usage
+      tree_override=$2
+      shift 2
+      ;;
     --all)
       mode=all
       shift
@@ -40,16 +57,20 @@ while [[ $# -gt 0 ]]; do
     --range)
       [[ $# -ge 3 ]] || usage
       mode=range
-      range_base=$2
-      range_head=$3
+      arg_base=$2
+      arg_head=$3
+      shift 3
+      ;;
+    --new-branch)
+      [[ $# -ge 3 ]] || usage
+      mode=new-branch
+      arg_head=$2
+      arg_remote=$3
       shift 3
       ;;
     --ci)
       mode=ci
       shift
-      ;;
-    -h | --help)
-      usage
       ;;
     *)
       usage
@@ -57,9 +78,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$mode" ]]; then
-  usage
-fi
+[[ -n "$mode" ]] || usage
 
 if [[ -z "$repo" ]]; then
   repo=$(git rev-parse --show-toplevel)
@@ -71,30 +90,90 @@ if [[ -z "$config" && -f "$repo/.gitleaks.toml" ]]; then
   config="$repo/.gitleaks.toml"
 fi
 
-sha_ok() {
-  [[ "$1" =~ ^[0-9a-fA-F]{40}$ ]]
+zero_re='^0+$'
+
+have_commit() {
+  [[ -n "$1" && "$1" != -* ]] && git cat-file -e "${1}^{commit}" 2> /dev/null
+}
+
+resolve_commit() {
+  local sha
+  if ! have_commit "$1" || ! sha=$(git rev-parse --verify -q "${1}^{commit}"); then
+    echo "missing-revision" >&2
+    exit 2
+  fi
+  printf '%s\n' "$sha"
+}
+
+default_branch_base() {
+  local ref
+  for ref in refs/remotes/origin/main refs/remotes/origin/HEAD; do
+    if have_commit "$ref"; then
+      git merge-base "$ref" "$1" 2> /dev/null || true
+      return 0
+    fi
+  done
+}
+
+# Scan plan. history=1 means rev_args names the commits to scan; the file list is
+# either the diff base...head or the full tree of head; contents come from scan_rev.
+history=0
+rev_args=()
+files_kind=""
+files_base=""
+files_head=""
+scan_rev=""
+empty_ok=0
+
+plan_range() {
+  history=1
+  rev_args=("${1}..${2}")
+  files_kind=diff
+  files_base=$1
+  files_head=$2
+  scan_rev=$2
+}
+
+plan_tree() {
+  files_kind=tree
+  files_head=$1
+  scan_rev=$1
 }
 
 if [[ "$mode" == "ci" ]]; then
-  event=${GITHUB_EVENT_NAME-}
-  case "$event" in
+  case "${GITHUB_EVENT_NAME-}" in
     workflow_dispatch)
       mode=all
       ;;
     pull_request)
-      range_base=${PR_BASE-}
-      range_head=${PR_HEAD-}
+      base=$(resolve_commit "${PR_BASE-}")
+      head=$(resolve_commit "${PR_HEAD-}")
+      merge=$(resolve_commit "${GITHUB_SHA-}")
       mode=range
+      plan_range "$base" "$head"
+      # Contents come from the merge result; the file list from base...head.
+      scan_rev=$merge
       ;;
     push)
+      head=$(resolve_commit "${RANGE_AFTER-}")
       before=${RANGE_BEFORE-}
-      after=${RANGE_AFTER-}
-      if [[ -z "$before" || "$before" =~ ^0+$ ]]; then
-        mode=all
+      mode=range
+      empty_ok=1
+      if [[ -n "$before" && ! "$before" =~ $zero_re ]] && have_commit "$before" &&
+        git merge-base --is-ancestor "$before" "$head"; then
+        plan_range "$(resolve_commit "$before")" "$head"
       else
-        range_base=$before
-        range_head=$after
-        mode=range
+        # New branch or force push: everything since the default branch.
+        base=$(default_branch_base "$head")
+        if [[ -n "$base" ]]; then
+          echo "note: range from default branch merge-base" >&2
+          plan_range "$(resolve_commit "$base")" "$head"
+        else
+          echo "note: no merge-base, scanning every commit of head" >&2
+          history=1
+          rev_args=("$head")
+          plan_tree "$head"
+        fi
       fi
       ;;
     *)
@@ -102,50 +181,292 @@ if [[ "$mode" == "ci" ]]; then
       exit 2
       ;;
   esac
-fi
-
-if [[ "$mode" == "range" ]]; then
-  if ! sha_ok "$range_base" || ! sha_ok "$range_head"; then
-    echo "bad-revision" >&2
-    exit 2
+elif [[ "$mode" == "range" ]]; then
+  base=$(resolve_commit "$arg_base")
+  head=$(resolve_commit "$arg_head")
+  plan_range "$base" "$head"
+elif [[ "$mode" == "new-branch" ]]; then
+  head=$(resolve_commit "$arg_head")
+  if [[ -z "$arg_remote" || "$arg_remote" == -* ]]; then
+    usage
   fi
-elif [[ "$mode" != "all" ]]; then
-  usage
+  history=1
+  rev_args=("$head" --not "--remotes=${arg_remote}")
+  plan_tree "$head"
+  mode=range
+  empty_ok=1
+else
+  plan_tree "$(resolve_commit HEAD)"
 fi
 
-# These exact paths are the self-test fixtures. A same-named file in any other
-# directory is still scanned. Skipping also requires the fake marker in the blob.
-fixture_marker="fake self-test fixture"
+if [[ -n "$tree_override" ]]; then
+  scan_rev=$(resolve_commit "$tree_override")
+fi
 
-exact_fixture_path() {
-  case "$1" in
-    scripts/privacy-fixtures/fake-private-key.txt | \
-      scripts/privacy-fixtures/fake-user-path.txt | \
-      scripts/privacy-fixtures/fake-github-token.txt | \
-      scripts/privacy-fixtures/keychain-password | \
-      scripts/privacy-fixtures/clean-users-path.txt)
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+commit_count=0
+if [[ "$history" -eq 1 ]]; then
+  commit_count=$(git rev-list --count "${rev_args[@]}")
+  if [[ "$commit_count" -eq 0 ]]; then
+    if [[ "$empty_ok" -ne 1 ]]; then
+      echo "empty-range" >&2
+      exit 2
+    fi
+    # A pushed branch with no new commits: nothing new to read in history, so
+    # scan its whole tree instead.
+    echo "note: no new commits, scanning the head tree" >&2
+    history=0
+    plan_tree "$files_head"
+    if [[ -n "$tree_override" ]]; then
+      scan_rev=$(resolve_commit "$tree_override")
+    fi
+  fi
+fi
+
+work=$(mktemp -d)
+cleanup() {
+  rm -rf "$work"
+}
+trap cleanup EXIT
+
+# Self-test fixtures: exact paths only, and a line is skipped only when it carries
+# the fake marker itself. Same rule as the fixture allowlist in .gitleaks.toml.
+fixture_marker="fake self-test fixture"
+fixture_paths="scripts/privacy-fixtures/fake-private-key.txt
+scripts/privacy-fixtures/fake-user-path.txt
+scripts/privacy-fixtures/fake-device-name.txt
+scripts/privacy-fixtures/clean-users-path.txt
+scripts/privacy-fixtures/keychain-password
+scripts/privacy-fixtures/fake-github-token.txt"
+
+# The first commits of this check had the marker only once per fixture file. For
+# those exact commits a fixture path is skipped when its blob has the marker.
+legacy_fixture_commits="94d496732e60e1551155b01aea4ec3ca5b2b2d04
+2542ec18fff050c167074836f8120369f5cd28d0"
+
+# Public history from before this check. Only the named rule is ignored, and only
+# for that exact commit. Mirrored in .gitleaks.toml.
+historical_allow="d8001e780038c391f69367999cc41cbe9336dafa users-path
+6ef593ad25b96559b67dde593ffc5bd978689d16 users-path
+ae5c13d06ac9670c96955ece48257abdf88b9e84 owner-device
+f7c8745f7cc94f03a33b3df5167a1f76ee8dcfa1 owner-device
+c5e8e8b546bd72ae9211f84afb922d09c72cbc48 owner-device"
+
+legacy_skips() {
+  local commit=$1 sha path
+  while IFS= read -r sha; do
+    [[ "$sha" == "$commit" ]] || continue
+    while IFS= read -r path; do
+      if [[ "$(git cat-file -t "${commit}:${path}" 2> /dev/null)" == blob ]] &&
+        git cat-file blob "${commit}:${path}" | grep -F -q -- "$fixture_marker"; then
+        printf '%s\n' "$path"
+      fi
+    done <<< "$fixture_paths"
+  done <<< "$legacy_fixture_commits"
 }
 
-blob_has_marker() {
-  local rev=$1 file=$2
-  if ! git cat-file -e "${rev}:${file}" 2>/dev/null; then
-    return 1
+allowed_rules() {
+  local commit=$1 sha rule
+  while read -r sha rule; do
+    if [[ "$sha" == "$commit" ]]; then
+      printf '%s ' "$rule"
+    fi
+  done <<< "$historical_allow"
+}
+
+read -r -d '' awk_lib << 'AWK' || true
+function trim_name(seg) {
+  sub(/\.+$/, "", seg)
+  return tolower(seg)
+}
+function users_hit(text,    rest, seg, name) {
+  rest = text
+  while (match(rest, /[\/\\]+[Uu][Ss][Ee][Rr][Ss][\/\\]+[^ \t\/\\"'<>:;,|(){}*$?=&#%!@+~`[]+/)) {
+    seg = substr(rest, RSTART, RLENGTH)
+    rest = substr(rest, RSTART + RLENGTH)
+    sub(/^[\/\\]+[Uu][Ss][Ee][Rr][Ss][\/\\]+/, "", seg)
+    name = trim_name(seg)
+    if (name != "" && name != "runner" && name != "shared") {
+      return 1
+    }
+  }
+  return 0
+}
+function home_hit(text,    rest, seg, name) {
+  rest = text
+  while (match(rest, /[\/\\]+[Hh][Oo][Mm][Ee][\/\\]+[^ \t\/\\"'<>:;,|(){}*$?=&#%!@+~`[]+/)) {
+    seg = substr(rest, RSTART, RLENGTH)
+    rest = substr(rest, RSTART + RLENGTH)
+    sub(/^[\/\\]+[Hh][Oo][Mm][Ee][\/\\]+/, "", seg)
+    name = trim_name(seg)
+    if (name != "" && name != "runner") {
+      return 1
+    }
+  }
+  return 0
+}
+function token_hit(text,    rest) {
+  rest = text
+  while (match(rest, /ghp_[A-Za-z0-9]+/)) {
+    if (RLENGTH >= 40) {
+      return 1
+    }
+    rest = substr(rest, RSTART + RLENGTH)
+  }
+  return 0
+}
+function in_list(list, item,    n, i, parts) {
+  n = split(list, parts, "\n")
+  for (i = 1; i <= n; i++) {
+    if (parts[i] != "" && parts[i] == item) {
+      return 1
+    }
+  }
+  return 0
+}
+function say(where, n, rule) {
+  if (index(" " allow " ", " " rule " ") == 0) {
+    print where ":" n " " rule
+  }
+}
+function report(where, n, text) {
+  if (in_list(legacy, where)) return
+  if (in_list(fixtures, where) && index(text, marker) > 0) return
+  if (users_hit(text)) say(where, n, "users-path")
+  if (home_hit(text)) say(where, n, "home-path")
+  if (text ~ /(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)/) say(where, n, "owner-device")
+  if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) say(where, n, "private-key")
+  if (token_hit(text)) say(where, n, "github-token")
+}
+function name_rules(path,    lower, base) {
+  if (in_list(legacy, path)) return
+  lower = tolower(path)
+  base = lower
+  sub(/.*\//, "", base)
+  if (("/" lower) ~ /\/\.config\/shortcup\// || ("/" lower) ~ /\/xcuserdata\// ||
+    base ~ /\.(p12|pem|key|cer|p8|pfx|mobileprovision|provisionprofile|keychain|keychain-db|certsigningrequest)$/ ||
+    base == "keychain-password" || base == ".env" || base ~ /^\.env\./) {
+    say(path, 1, "forbidden-filename")
+  }
+  if (base ~ /^validation-(events|state|results)/ || ("/" lower) ~ /\/validation-fixtures\//) {
+    say(path, 1, "runtime-output")
+  }
+  if (users_hit("/" path)) say(path, 1, "users-path-in-name")
+  if (home_hit("/" path)) say(path, 1, "home-path-in-name")
+}
+AWK
+
+# Values go through ENVIRON because awk -v would rewrite backslashes in file names.
+run_awk() {
+  local body=$4
+  PC_FIXTURES=$fixture_paths PC_MARKER=$fixture_marker PC_LEGACY=$1 PC_ALLOW=$2 PC_WHERE=$3 \
+    awk "${awk_lib}
+BEGIN {
+  fixtures = ENVIRON[\"PC_FIXTURES\"]
+  marker = ENVIRON[\"PC_MARKER\"]
+  legacy = ENVIRON[\"PC_LEGACY\"]
+  allow = ENVIRON[\"PC_ALLOW\"]
+  where = ENVIRON[\"PC_WHERE\"]
+}
+${body}" "${@:5}"
+}
+
+# Path segments after users/ or home/ are replaced before anything is printed.
+redact() {
+  sed -E 's#(^|[/\\])([Uu][Ss][Ee][Rr][Ss]|[Hh][Oo][Mm][Ee])([/\\]+)[^/\\:]+#\1\2\3<redacted>#g'
+}
+
+found_file="$work/found"
+: > "$found_file"
+
+list_files() {
+  if [[ "$files_kind" == diff ]]; then
+    git diff --name-only -z --no-renames --diff-filter=d "${files_base}...${files_head}"
+  else
+    git ls-tree -r -z --name-only "$files_head"
   fi
-  git show "${rev}:${file}" | grep -F -q -- "$fixture_marker"
+}
+list_files > "$work/files"
+
+# gitleaks exits 1 on its own errors too, so leaks get a distinct code.
+leak_code=77
+
+parse_report() {
+  python3 - "$1" << 'PY'
+import json
+import os
+import sys
+
+path = sys.argv[1]
+if not os.path.isfile(path):
+    sys.exit(2)
+try:
+    with open(path) as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(2)
+if not isinstance(data, list):
+    sys.exit(2)
+for item in data:
+    if not isinstance(item, dict):
+        sys.exit(2)
+    name = str(item.get("File") or "")
+    if name.startswith("./"):
+        name = name[2:]
+    try:
+        line = max(int(item.get("StartLine") or 1), 1)
+    except (TypeError, ValueError):
+        line = 1
+    rule = str(item.get("RuleID") or "unknown")
+    if not name or any(c in name for c in "\n\r") or any(c in rule for c in "\n\r \t"):
+        name = "<unprintable>"
+    sys.stdout.write(f"{name}:{line} {rule}\n")
+PY
+}
+
+# Any exit code other than 0 or leak_code, any ERR log line, an unreadable report,
+# a report that disagrees with the exit code, or a history scan of 0 commits is a
+# tool failure (exit 2), never a pass.
+run_one_gitleaks() {
+  local report=$1 expect_commits=$2 code n scanned
+  shift 2
+  set +e
+  gitleaks "$@" --no-banner --redact --no-color --exit-code "$leak_code" \
+    --report-format json --report-path "$report" --config "$config" > /dev/null 2> "$work/gitleaks.err"
+  code=$?
+  set -e
+  if [[ "$code" -ne 0 && "$code" -ne "$leak_code" ]]; then
+    echo "gitleaks-failed" >&2
+    exit 2
+  fi
+  if grep -E -q '(^|[[:space:]])ERR([[:space:]]|$)' "$work/gitleaks.err"; then
+    echo "gitleaks-error-log" >&2
+    exit 2
+  fi
+  if [[ "$expect_commits" -gt 0 ]]; then
+    scanned=$(sed -n -E 's/.*[[:space:]]([0-9]+) commits scanned.*/\1/p' "$work/gitleaks.err" | tail -n 1)
+    if [[ -z "$scanned" || "$scanned" -eq 0 ]]; then
+      echo "gitleaks-scanned-no-commits" >&2
+      exit 2
+    fi
+  fi
+  if ! parse_report "$report" > "$work/parsed"; then
+    echo "gitleaks-report-unreadable" >&2
+    exit 2
+  fi
+  n=$(wc -l < "$work/parsed" | tr -d ' ')
+  if [[ "$code" -eq 0 && "$n" -ne 0 ]] || [[ "$code" -eq "$leak_code" && "$n" -eq 0 ]]; then
+    echo "gitleaks-report-mismatch" >&2
+    exit 2
+  fi
+  cat "$work/parsed" >> "$found_file"
 }
 
 run_gitleaks() {
-  if ! command -v gitleaks >/dev/null 2>&1; then
+  if ! command -v gitleaks > /dev/null 2>&1; then
     echo "gitleaks-not-found" >&2
     exit 2
   fi
-  if ! command -v python3 >/dev/null 2>&1; then
+  if ! command -v python3 > /dev/null 2>&1; then
     echo "python3-not-found" >&2
     exit 2
   fi
@@ -153,309 +474,103 @@ run_gitleaks() {
     echo "gitleaks-config-missing" >&2
     exit 2
   fi
+  config=$(cd "$(dirname "$config")" && pwd)/$(basename "$config")
 
-  local report err code parsed scan_root archive
-  report=$(mktemp)
-  err=$(mktemp)
-  archive=""
-  scan_root=$repo
-  # Full mode scans the HEAD tree, not the working directory or gitignored files.
-  if [[ "$mode" != "range" ]]; then
-    archive=$(mktemp -d)
-    git archive HEAD | tar -x -C "$archive"
-    scan_root=$archive
-  fi
-  cleanup() {
-    rm -f "$report" "$err"
-    if [[ -n "$archive" ]]; then
-      rm -rf "$archive"
-    fi
-  }
-  trap cleanup EXIT
-
-  # Range mode scans every commit in base..head. Full mode scans the archived HEAD tree.
-  local -a args=()
-  if [[ "$mode" == "range" ]]; then
-    args=(
-      git
-      --no-banner
-      --redact
-      --no-color
-      --exit-code 1
-      --report-format json
-      --report-path "$report"
-      --config "$config"
-      --log-opts="${range_base}..${range_head}"
-    )
-  else
-    args=(
-      dir
-      --no-banner
-      --redact
-      --no-color
-      --exit-code 1
-      --report-format json
-      --report-path "$report"
-      --config "$config"
-      .
-    )
+  # History. -m shows each merge against every parent, so content that exists only
+  # in a merge commit is scanned too. --no-renames makes a pure rename an add, so
+  # path rules see the new name.
+  if [[ "$mode" == all ]]; then
+    run_one_gitleaks "$work/history.json" "$(git rev-list --count --all)" \
+      git --log-opts="--all -m --no-renames" "$repo"
+  elif [[ "$history" -eq 1 ]]; then
+    run_one_gitleaks "$work/history.json" "$commit_count" \
+      git --log-opts="-m --no-renames ${rev_args[*]}" "$repo"
   fi
 
-  set +e
-  if [[ "$mode" == "range" ]]; then
-    gitleaks "${args[@]}" >/dev/null 2>"$err"
-    code=$?
-  else
-    # Scan from the archive root so reported paths stay repo-relative.
-    (
-      cd "$scan_root"
-      gitleaks "${args[@]}" >/dev/null 2>"$err"
-    )
-    code=$?
-  fi
-  set -e
-  if [[ "$code" -ne 0 && "$code" -ne 1 ]]; then
-    echo "gitleaks-failed" >&2
-    exit 2
-  fi
-
-  set +e
-  python3 - "$report" "$scan_root" << 'PY'
-import json
-import os
-import sys
-
-path, root = sys.argv[1], sys.argv[2]
-data = []
-if os.path.isfile(path) and os.path.getsize(path) > 0:
-    try:
-        loaded = json.load(open(path))
-    except Exception:
-        sys.exit(2)
-    if isinstance(loaded, list):
-        data = loaded
-
-count = 0
-for item in data:
-    if not isinstance(item, dict):
-        continue
-    name = str(item.get("File") or "")
-    prefix = root + "/"
-    if name.startswith(prefix):
-        name = name[len(prefix) :]
-    if name.startswith("./"):
-        name = name[2:]
-    try:
-        line = int(item.get("StartLine") or 1)
-    except (TypeError, ValueError):
-        line = 1
-    if line < 1:
-        line = 1
-    rule = str(item.get("RuleID") or "unknown")
-    if not name or any(char in name for char in "\n\r") or any(char in rule for char in "\n\r \t"):
-        continue
-    sys.stdout.write(f"{name}:{line} {rule}\n")
-    count += 1
-sys.exit(1 if count else 0)
-PY
-  parsed=$?
-  set -e
-  cleanup
-  trap - EXIT
-
-  if [[ "$parsed" -eq 2 ]]; then
-    echo "gitleaks-report-unreadable" >&2
-    exit 2
-  fi
-  if [[ "$parsed" -eq 1 || "$code" -eq 1 ]]; then
-    exit 1
-  fi
-  if [[ "$parsed" -ne 0 ]]; then
-    echo "gitleaks-report-unreadable" >&2
-    exit 2
-  fi
-  exit 0
+  # Tree. The listed files as they are in scan_rev (the merge result on PRs),
+  # never the working directory.
+  local tree="$work/tree" file
+  mkdir -p "$tree"
+  while IFS= read -r -d '' file; do
+    [[ "$(git cat-file -t "${scan_rev}:${file}" 2> /dev/null)" == blob ]] || continue
+    mkdir -p "$tree/$(dirname "$file")"
+    git cat-file blob "${scan_rev}:${file}" > "$tree/$file"
+  done < "$work/files"
+  (
+    cd "$tree"
+    run_one_gitleaks "$work/tree.json" 0 dir .
+  )
 }
 
-if [[ "$use_gitleaks" -eq 1 ]]; then
-  run_gitleaks
-fi
-
-scan_rev=HEAD
-if [[ "$mode" == "range" ]]; then
-  scan_rev=$range_head
-fi
+is_media() {
+  local ext
+  [[ "$1" == *.* ]] || return 1
+  ext=$(printf '%s' "${1##*.}" | tr '[:upper:]' '[:lower:]')
+  case "$ext" in
+    png | jpg | jpeg | gif | heic | heif | tiff | webp | bmp | pdf | mov | mp4 | webm | mkv) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 
 summary_started=0
-warn_image() {
-  local file=$1
-  local base ext
-  base=${file##*/}
-  ext=""
-  case "$base" in
-    *.*) ext=${base##*.} ;;
-    *) return 0 ;;
-  esac
-  ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
-  case "$ext" in
-    png | jpg | jpeg | gif | heic | heif | tiff | webp | bmp | pdf | mov | mp4 | webm | mkv) ;;
-    *) return 0 ;;
-  esac
+warn_media() {
   local safe
-  safe=${file//%/%25}
-  safe=${safe//$'\n'/%0A}
+  safe=$(printf '%s\n' "$1" | redact)
+  safe=${safe//%/%25}
   safe=${safe//$'\r'/%0D}
-  printf '%s\n' "::warning file=${safe}::Added file may contain screen contents. This warning does not fail the check." >&2
+  safe=${safe//,/%2C}
+  safe=${safe//::/%3A%3A}
+  printf '%s\n' "::warning file=${safe}::Added image, video, or PDF may contain screen contents. Warning only." >&2
   [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
   if [[ "$summary_started" -eq 0 ]]; then
     printf '%s\n' "### Privacy scan warnings" >> "$GITHUB_STEP_SUMMARY"
     summary_started=1
   fi
-  printf '%s\n' "- Warning: \`${file}\` was added. Image, video, and document files may contain screen contents. This warning does not fail the check." >> "$GITHUB_STEP_SUMMARY"
+  printf '%s\n' "- Warning: \`${safe}\` was added. Image, video, and PDF files may contain screen contents. This does not fail the check." >> "$GITHUB_STEP_SUMMARY"
 }
 
-classify_name() {
-  local base=$1
-  local lower
-  lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
-  case "$lower" in
-    *.p12 | *.pem | *.key | *.cer | *.p8 | *.pfx | *.mobileprovision | *.provisionprofile | *.keychain-db | keychain-password | .env | .env.*)
-      printf '%s\n' "forbidden-filename"
-      ;;
-    validation-events.jsonl | validation-state.json | validation-results.json)
-      printf '%s\n' "runtime-output"
-      ;;
-  esac
-}
+builtin_check() {
+  local file kind bom commit legacy allow
 
-list_tmp=$(mktemp)
-cleanup_list() {
-  rm -f "$list_tmp"
-}
-trap cleanup_list EXIT
-if [[ "$mode" == "all" ]]; then
-  git ls-files -z > "$list_tmp"
-else
-  git diff --name-only --diff-filter=d -z "$range_base" "$range_head" > "$list_tmp"
-fi
+  # Files: names, then contents as of scan_rev. NUL bytes are dropped and UTF-16
+  # with a BOM is converted, so binary and UTF-16 files are still read.
+  tr '\000' '\n' < "$work/files" | run_awk "" "" "" '{ name_rules($0) }' >> "$found_file"
 
-found=0
-while IFS= read -r -d '' file; do
-  if exact_fixture_path "$file" && blob_has_marker "$scan_rev" "$file"; then
-    continue
-  fi
+  while IFS= read -r -d '' file; do
+    kind=$(git cat-file -t "${scan_rev}:${file}" 2> /dev/null || true)
+    [[ "$kind" == blob ]] || continue
+    git cat-file blob "${scan_rev}:${file}" > "$work/blob"
+    bom=$(head -c 2 "$work/blob" | od -An -tx1 | tr -d ' \n')
+    if [[ "$bom" == fffe || "$bom" == feff ]] &&
+      iconv -f UTF-16 -t UTF-8 < "$work/blob" > "$work/text" 2> /dev/null; then
+      :
+    else
+      tr -d '\000' < "$work/blob" > "$work/text"
+    fi
+    run_awk "" "" "$file" '{ report(where, FNR, $0) }' "$work/text" >> "$found_file"
+  done < "$work/files"
 
-  rule=$(classify_name "${file##*/}")
-  if [[ -n "$rule" ]]; then
-    printf '%s\n' "${file}:1 ${rule}"
-    found=1
-  fi
+  [[ "$history" -eq 1 ]] || return 0
 
-  if ! git cat-file -e "${scan_rev}:${file}" 2>/dev/null; then
-    continue
-  fi
-  # A NUL delimiter means the blob is binary. Do not pass a NUL pattern to grep;
-  # grep treats it as an empty pattern and would skip every text file.
-  if git show "${scan_rev}:${file}" | { IFS= read -r -d '' _; }; then
-    continue
-  fi
+  # Commits: every message and every added line, merges against each parent.
+  # A line added and removed again inside the range is still a finding.
+  git rev-list --reverse "${rev_args[@]}" > "$work/commits"
+  local warned=$'\n'
+  while IFS= read -r commit; do
+    [[ -n "$commit" ]] || continue
+    legacy=$(legacy_skips "$commit")
+    allow=$(allowed_rules "$commit")
 
-  hits=$(
-    git show "${scan_rev}:${file}" | awk -v file="$file" '
-      {
-        rest = $0
-        bad = 0
-        while (match(rest, /\/Users\/[A-Za-z0-9._-]+/)) {
-          name = substr(rest, RSTART + 7, RLENGTH - 7)
-          if (name != "runner" && name != "Shared") {
-            bad = 1
-          }
-          rest = substr(rest, RSTART + RLENGTH)
-        }
-        if (bad) {
-          print file ":" FNR " users-path"
-        }
-        if ($0 ~ /BEGIN [A-Z ]*PRIVATE KEY/) {
-          print file ":" FNR " private-key"
-        }
-        if ($0 ~ /ghp_[A-Za-z0-9]{36}/) {
-          print file ":" FNR " github-token"
-        }
-      }
-    '
-  )
-  if [[ -n "$hits" ]]; then
-    printf '%s\n' "$hits"
-    found=1
-  fi
-done < "$list_tmp"
+    git log -1 --format=%B "$commit" | tr -d '\000' |
+      run_awk "" "$allow" "$commit" '$0 != "" { report(where, FNR, $0) }' >> "$found_file"
 
-# Range mode reads every commit message and every added diff line. A path that
-# is added and later removed is still a finding. Deleted lines are not.
-if [[ "$mode" == "range" ]]; then
-  diff_hits=$(
-    git rev-list --reverse "${range_base}..${range_head}" | while IFS= read -r commit; do
-      [[ -z "$commit" ]] && continue
-      skip_paths=""
-      for fixture in \
-        scripts/privacy-fixtures/fake-private-key.txt \
-        scripts/privacy-fixtures/fake-user-path.txt \
-        scripts/privacy-fixtures/fake-github-token.txt \
-        scripts/privacy-fixtures/keychain-password \
-        scripts/privacy-fixtures/clean-users-path.txt
-      do
-        if blob_has_marker "$commit" "$fixture"; then
-          skip_paths+="${fixture}"$'\n'
-        fi
-      done
-      # %B is the commit message. -p appends the patch, including ^+ lines.
-      git log -1 -m -p -U0 --no-color --format=%B "$commit" | awk -v commit="$commit" -v skip="$skip_paths" '
-        function bad_home(text,    rest, name) {
-          rest = text
-          while (match(rest, /\/Users\/[A-Za-z0-9._-]+/)) {
-            name = substr(rest, RSTART + 7, RLENGTH - 7)
-            if (name != "runner" && name != "Shared") {
-              return 1
-            }
-            rest = substr(rest, RSTART + RLENGTH)
-          }
-          return 0
-        }
-        function emit(where, lineno, text) {
-          if (bad_home(text)) {
-            print where ":" lineno " users-path"
-          }
-          if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) {
-            print where ":" lineno " private-key"
-          }
-          if (text ~ /ghp_[A-Za-z0-9]{36}/) {
-            print where ":" lineno " github-token"
-          }
-        }
-        function skipped(path,    n, i, parts) {
-          n = split(skip, parts, "\n")
-          for (i = 1; i <= n; i++) {
-            if (parts[i] == path) {
-              return 1
-            }
-          }
-          return 0
-        }
-        BEGIN { in_patch = 0; msgline = 0; file = ""; newline = 0 }
-        in_patch == 0 && /^diff --git / {
-          in_patch = 1
-          file = ""
-          newline = 0
-          next
-        }
-        in_patch == 0 {
-          msgline++
-          if ($0 != "") {
-            emit(commit, msgline, $0)
-          }
-          next
-        }
-        /^\+\+\+ / {
+    # Headers are read only until the first @@ of each file, so an added line whose
+    # text looks like "++ /dev/null" is still treated as content.
+    git -c core.quotePath=false log -1 -m -p -U0 --no-color --no-ext-diff --format= "$commit" |
+      tr -d '\000' |
+      run_awk "$legacy" "$allow" "" '
+        /^diff --git / { file = ""; header = 1; newline = 0; next }
+        header == 1 && /^\+\+\+ / {
           file = substr($0, 5)
           sub(/^b\//, "", file)
           if (file == "/dev/null") {
@@ -464,46 +579,51 @@ if [[ "$mode" == "range" ]]; then
           next
         }
         /^@@ / {
+          header = 0
+          newline = 0
           if (match($0, /\+[0-9]+/)) {
             newline = substr($0, RSTART + 1, RLENGTH - 1) + 0
           }
           next
         }
+        header == 1 { next }
         /^\+/ {
-          if (file != "" && !skipped(file) && newline > 0) {
-            emit(file, newline, substr($0, 2))
+          if (file != "" && newline > 0) {
+            report(file, newline, substr($0, 2))
           }
           if (newline > 0) {
             newline++
           }
-          next
         }
-      '
-    done
-  )
-  if [[ -n "$diff_hits" ]]; then
-    printf '%s\n' "$diff_hits"
-    found=1
-  fi
+      ' >> "$found_file"
 
-  added_tmp=$(mktemp)
-  # --no-renames reports a rename as a delete plus an add, so git mv notes.txt .env is visible.
-  git log --reverse --no-renames --diff-filter=A --name-only --pretty=format: "${range_base}..${range_head}" > "$added_tmp"
-  while IFS= read -r file; do
-    [[ -z "$file" ]] && continue
-    if exact_fixture_path "$file"; then
-      continue
-    fi
-    rule=$(classify_name "${file##*/}")
-    if [[ -n "$rule" ]]; then
-      printf '%s\n' "${file}:1 ${rule}"
-      found=1
-    fi
-    warn_image "$file"
-  done < "$added_tmp"
-  rm -f "$added_tmp"
+    # Added names per commit. --no-renames turns a rename into delete plus add,
+    # and -z keeps non-ASCII names unquoted.
+    git log -1 -z -m --no-renames --diff-filter=A --name-only --format= "$commit" > "$work/added"
+    tr '\000' '\n' < "$work/added" |
+      run_awk "$legacy" "$allow" "" '$0 != "" { name_rules($0) }' >> "$found_file"
+
+    while IFS= read -r -d '' file; do
+      [[ -n "$file" ]] || continue
+      case "$warned" in
+        *$'\n'"$file"$'\n'*) continue ;;
+      esac
+      if is_media "$file"; then
+        warned+="$file"$'\n'
+        warn_media "$file"
+      fi
+    done < "$work/added"
+  done < "$work/commits"
+}
+
+if [[ "$use_gitleaks" -eq 1 ]]; then
+  run_gitleaks
+else
+  builtin_check
 fi
 
-cleanup_list
-trap - EXIT
-exit "$found"
+if [[ -s "$found_file" ]]; then
+  redact < "$found_file" | awk '!seen[$0]++'
+  exit 1
+fi
+exit 0
