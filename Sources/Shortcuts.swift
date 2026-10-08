@@ -24,6 +24,54 @@ func shortcutText(character: String, virtualKey: Int?, glyph: Int?, modifiers: I
     ).trimmingCharacters(in: .whitespaces)
 }
 
+// Window-button shortcuts only. Does not use shortcutText's glyph table.
+// Glyph 0 is no glyph. 99 is Caps Lock and 103 is Help, so they produce no hint.
+// Home is 102 and End is 105. A mapped glyph and a virtual key that is not that same key produce no hint.
+func windowShortcutText(character: String, virtualKey: Int?, glyph: Int?, modifiers: Int?) -> String? {
+    let glyphCode: Int? = (glyph == nil || glyph == 0) ? nil : glyph
+    let fromGlyph = glyphCode.flatMap(windowGlyphText)
+    let fromKey = virtualKey.flatMap(windowVirtualKeyText)
+    if glyphCode != nil && fromGlyph == nil { return nil }
+    if let fromGlyph, virtualKey != nil, fromGlyph != fromKey { return nil }
+    var key = fromGlyph ?? fromKey
+    if key == nil, glyphCode == nil, !character.isEmpty {
+        let controlChars = ["\u{08}": "⌫", "\u{09}": "⇥", "\u{0d}": "↩", "\u{1b}": "⎋",
+                            "\u{7f}": "⌫", "\u{1c}": "←", "\u{1d}": "→", "\u{1e}": "↑", "\u{1f}": "↓", " ": "Space"]
+        key = controlChars[character] ?? character.uppercased()
+    }
+    guard let key, let modifiers else { return nil }
+    return ((modifiers & 4 != 0 ? "⌃" : "") + (modifiers & 2 != 0 ? "⌥" : "") +
+           (modifiers & 1 != 0 ? "⇧" : "") + (modifiers & 8 == 0 ? "⌘" : "") + " " + key
+    ).trimmingCharacters(in: .whitespaces)
+}
+
+func windowGlyphText(_ glyph: Int) -> String? {
+    let glyphs = [2: "⇥", 3: "⇤", 9: "Space", 10: "⌦", 11: "↩", 12: "↩", 23: "⌫",
+                  27: "⎋", 98: "⇞", 100: "←", 101: "→", 102: "↖", 104: "↑", 105: "↘", 106: "↓", 107: "⇟"]
+    if let text = glyphs[glyph] { return text }
+    if (111...122).contains(glyph) { return "F\(glyph - 110)" }
+    return nil
+}
+
+// Virtual key codes, not menu glyphs. 99 is F3 and 103 is F11.
+func windowVirtualKeyText(_ key: Int) -> String? {
+    let keys = [36: "↩", 48: "⇥", 49: "Space", 51: "⌫", 53: "⎋", 115: "↖", 116: "⇞",
+                117: "⌦", 119: "↘", 121: "⇟", 123: "←", 124: "→", 125: "↓", 126: "↑",
+                122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8",
+                101: "F9", 109: "F10", 103: "F11", 111: "F12"]
+    return keys[key]
+}
+
+func windowButtonLabel(subrole: String) -> String {
+    switch subrole {
+    case "AXCloseButton": return "닫기"
+    case "AXMinimizeButton": return "최소화"
+    case "AXFullScreenButton": return "전체 화면"
+    case "AXZoomButton": return "확대/축소"
+    default: return ""
+    }
+}
+
 struct MenuCommand {
     let title: String
     let shortcut: String?
@@ -118,6 +166,15 @@ func subroleForMenuIdentifier(_ identifier: String) -> String? {
     case "performZoom:", "_performZoom:": return "AXZoomButton"
     default: return nil
     }
+}
+
+func windowButtonFallbackTitles() -> Set<String> {
+    var names = Set<String>()
+    for subrole in ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"] {
+        guard let query = windowButtonQuery(role: "AXButton", subrole: subrole) else { continue }
+        names.formUnion((query.preferred + query.fallback).map(normalized))
+    }
+    return names
 }
 
 func windowMenuDumpTitles() -> Set<String> {
