@@ -16,6 +16,7 @@ cat > "$hooks/pre-push" << 'EOF'
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
+cd "$root"
 check="$root/scripts/privacy-check.sh"
 status=0
 

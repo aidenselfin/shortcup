@@ -232,13 +232,16 @@ if [[ "$mode" == "range" ]]; then
   scan_rev=$range_head
 fi
 
-list_files() {
-  if [[ "$mode" == "all" ]]; then
-    git ls-files -z
-  else
-    git diff --name-only --diff-filter=d -z "$range_base" "$range_head"
-  fi
+list_tmp=$(mktemp)
+cleanup_list() {
+  rm -f "$list_tmp"
 }
+trap cleanup_list EXIT
+if [[ "$mode" == "all" ]]; then
+  git ls-files -z > "$list_tmp"
+else
+  git diff --name-only --diff-filter=d -z "$range_base" "$range_head" > "$list_tmp"
+fi
 
 found=0
 while IFS= read -r -d '' file; do
@@ -295,6 +298,8 @@ while IFS= read -r -d '' file; do
     printf '%s\n' "$hits"
     found=1
   fi
-done < <(list_files)
+done < "$list_tmp"
 
+cleanup_list
+trap - EXIT
 exit "$found"
