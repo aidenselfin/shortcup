@@ -32,12 +32,10 @@ git -C "$repo" config commit.gpgsign false
 git -C "$repo" add .
 git -C "$repo" commit -q -m "plant fake fixtures"
 
-cat "$root/.gitleaks.toml" "$root/scripts/privacy-fixtures/macos-user-path.toml" > "$tmp/gitleaks.toml"
-
 set +e
 check_out=$(bash "$check" --repo "$repo" --all 2>"$tmp/check.err")
 check_code=$?
-gl_out=$(bash "$check" --repo "$repo" --all --gitleaks --config "$tmp/gitleaks.toml" 2>"$tmp/gl.err")
+gl_out=$(bash "$check" --repo "$repo" --all --gitleaks --config "$root/.gitleaks.toml" 2>"$tmp/gl.err")
 gl_code=$?
 set -e
 
@@ -106,6 +104,67 @@ require_finding "$gl_out" "planted/keychain-password" "keychain-password-file"
 
 if printf '%s\n' "$check_out" "$gl_out" | grep -F -q "clean/clean-users-path.txt"; then
   echo "clean-file-flagged" >&2
+  exit 1
+fi
+
+# A home path added in one commit and removed in a later commit must still fail
+# a range scan. The tree at HEAD is clean, so a head-only scan must pass.
+range_repo="$tmp/range"
+mkdir -p "$range_repo"
+git init -q "$range_repo"
+git -C "$range_repo" config user.email "privacy-selftest@example.invalid"
+git -C "$range_repo" config user.name "privacy-selftest"
+git -C "$range_repo" config commit.gpgsign false
+printf '%s\n' "ok" > "$range_repo/ok.txt"
+git -C "$range_repo" add ok.txt
+git -C "$range_repo" commit -q -m "base"
+range_base=$(git -C "$range_repo" rev-parse HEAD)
+cp "$root/scripts/privacy-fixtures/fake-user-path.txt" "$range_repo/added-path.txt"
+printf '%s\n' "not-a-screenshot" > "$range_repo/shot.png"
+printf '%s\n' "placeholder" > "$range_repo/.env.local"
+git -C "$range_repo" add added-path.txt shot.png .env.local
+git -C "$range_repo" commit -q -m "add fakes"
+git -C "$range_repo" rm -q -- added-path.txt shot.png .env.local
+git -C "$range_repo" commit -q -m "remove fakes"
+range_head=$(git -C "$range_repo" rev-parse HEAD)
+summary="$tmp/summary"
+
+set +e
+range_out=$(GITHUB_STEP_SUMMARY="$summary" bash "$check" --repo "$range_repo" --range "$range_base" "$range_head" 2>"$tmp/range.err")
+range_code=$?
+range_gl=$(bash "$check" --repo "$range_repo" --range "$range_base" "$range_head" --gitleaks --config "$root/.gitleaks.toml" 2>"$tmp/range-gl.err")
+range_gl_code=$?
+range_all=$(bash "$check" --repo "$range_repo" --all 2>"$tmp/range-all.err")
+range_all_code=$?
+range_all_gl=$(bash "$check" --repo "$range_repo" --all --gitleaks --config "$root/.gitleaks.toml" 2>"$tmp/range-all-gl.err")
+range_all_gl_code=$?
+set -e
+
+if [[ -s "$tmp/range.err" || -s "$tmp/range-gl.err" || -s "$tmp/range-all.err" || -s "$tmp/range-all-gl.err" ]]; then
+  echo "range-stderr" >&2
+  exit 1
+fi
+if [[ "$range_code" -ne 1 || "$range_gl_code" -ne 1 ]]; then
+  echo "range-should-fail check=${range_code} gitleaks=${range_gl_code}" >&2
+  exit 1
+fi
+if [[ "$range_all_code" -ne 0 || "$range_all_gl_code" -ne 0 || -n "$range_all" || -n "$range_all_gl" ]]; then
+  echo "head-scan-should-pass" >&2
+  exit 1
+fi
+assert_redacted "$range_out"
+assert_redacted "$range_gl"
+assert_no_raw_fixture "$range_out"
+assert_no_raw_fixture "$range_gl"
+require_finding "$range_out" "added-path.txt" "users-path"
+require_finding "$range_out" ".env.local" "forbidden-filename"
+require_finding "$range_gl" "added-path.txt" "macos-user-path"
+if [[ ! -f "$summary" ]] || ! grep -F -q "shot.png" "$summary" || ! grep -F -q "Warning:" "$summary"; then
+  echo "missing-image-warning" >&2
+  exit 1
+fi
+if grep -F -q "/Users/" "$summary"; then
+  echo "summary-leaked-path" >&2
   exit 1
 fi
 

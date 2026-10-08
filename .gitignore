@@ -4,6 +4,8 @@ keychain-password
 !scripts/privacy-fixtures/keychain-password
 *.keychain-db
 *.p12
+*.pem
+*.key
 *.cer
 .env
 .env.*

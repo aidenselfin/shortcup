@@ -142,18 +142,33 @@ run_gitleaks() {
   }
   trap cleanup EXIT
 
-  local -a args=(
-    git
-    --no-banner
-    --redact
-    --no-color
-    --exit-code 1
-    --report-format json
-    --report-path "$report"
-    --config "$config"
-  )
+  # Range mode scans every commit in base..head. Full-history mode scans the
+  # tree at HEAD only, so a path that was added and later removed is not a hit.
+  local -a args=()
   if [[ "$mode" == "range" ]]; then
-    args+=(--log-opts="${range_base}..${range_head}")
+    args=(
+      git
+      --no-banner
+      --redact
+      --no-color
+      --exit-code 1
+      --report-format json
+      --report-path "$report"
+      --config "$config"
+      --log-opts="${range_base}..${range_head}"
+    )
+  else
+    args=(
+      dir
+      --no-banner
+      --redact
+      --no-color
+      --exit-code 1
+      --report-format json
+      --report-path "$report"
+      --config "$config"
+      "$repo"
+    )
   fi
 
   set +e
@@ -232,6 +247,43 @@ if [[ "$mode" == "range" ]]; then
   scan_rev=$range_head
 fi
 
+summary_started=0
+warn_image() {
+  local file=$1
+  local base ext
+  base=${file##*/}
+  ext=""
+  case "$base" in
+    *.*) ext=${base##*.} ;;
+    *) return 0 ;;
+  esac
+  ext=$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')
+  case "$ext" in
+    png | jpg | jpeg | gif | heic | tiff | mov | mp4) ;;
+    *) return 0 ;;
+  esac
+  [[ -n "${GITHUB_STEP_SUMMARY:-}" ]] || return 0
+  if [[ "$summary_started" -eq 0 ]]; then
+    printf '%s\n' "### Privacy scan warnings" >> "$GITHUB_STEP_SUMMARY"
+    summary_started=1
+  fi
+  printf '%s\n' "- Warning: \`${file}\` was added. Image and video files may contain screen contents. This warning does not fail the check." >> "$GITHUB_STEP_SUMMARY"
+}
+
+classify_name() {
+  local base=$1
+  local lower
+  lower=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+  case "$lower" in
+    *.p12 | *.pem | *.key | *.cer | *.p8 | *.pfx | *.mobileprovision | *.provisionprofile | *.keychain-db | keychain-password | .env | .env.*)
+      printf '%s\n' "forbidden-filename"
+      ;;
+    validation-events.jsonl | validation-state.json | validation-results.json)
+      printf '%s\n' "runtime-output"
+      ;;
+  esac
+}
+
 list_tmp=$(mktemp)
 cleanup_list() {
   rm -f "$list_tmp"
@@ -249,17 +301,11 @@ while IFS= read -r -d '' file; do
     continue
   fi
 
-  base=${file##*/}
-  case "$base" in
-    *.p12 | *.pem | *.key | *.cer | *.keychain-db | keychain-password | .env)
-      printf '%s\n' "${file}:1 forbidden-filename"
-      found=1
-      ;;
-    validation-events.jsonl | validation-state.json | validation-results.json)
-      printf '%s\n' "${file}:1 runtime-output"
-      found=1
-      ;;
-  esac
+  rule=$(classify_name "${file##*/}")
+  if [[ -n "$rule" ]]; then
+    printf '%s\n' "${file}:1 ${rule}"
+    found=1
+  fi
 
   if ! git cat-file -e "${scan_rev}:${file}" 2>/dev/null; then
     continue
@@ -299,6 +345,77 @@ while IFS= read -r -d '' file; do
     found=1
   fi
 done < "$list_tmp"
+
+# Range mode also reads every commit patch. A path added and later removed is
+# still a finding. Only added lines count, so deleting one is not a finding.
+if [[ "$mode" == "range" ]]; then
+  diff_hits=$(
+    git log --reverse -m -U0 --no-color --format= "${range_base}..${range_head}" | awk '
+      function bad_home(text,    rest, name) {
+        rest = text
+        while (match(rest, /\/Users\/[A-Za-z0-9._-]+/)) {
+          name = substr(rest, RSTART + 7, RLENGTH - 7)
+          if (name != "runner" && name != "Shared") {
+            return 1
+          }
+          rest = substr(rest, RSTART + RLENGTH)
+        }
+        return 0
+      }
+      function fixture(path) {
+        return path == "scripts/privacy-fixtures" || index(path, "scripts/privacy-fixtures/") == 1
+      }
+      /^diff --git / {
+        file = ""
+        newline = 0
+        next
+      }
+      /^\+\+\+ / {
+        file = substr($0, 5)
+        sub(/^b\//, "", file)
+        if (file == "/dev/null") {
+          file = ""
+        }
+        next
+      }
+      /^@@ / {
+        if (match($0, /\+[0-9]+/)) {
+          newline = substr($0, RSTART + 1, RLENGTH - 1) + 0
+        }
+        next
+      }
+      /^\+/ {
+        if (file != "" && !fixture(file) && newline > 0 && bad_home(substr($0, 2))) {
+          print file ":" newline " users-path"
+        }
+        if (newline > 0) {
+          newline++
+        }
+        next
+      }
+    '
+  )
+  if [[ -n "$diff_hits" ]]; then
+    printf '%s\n' "$diff_hits"
+    found=1
+  fi
+
+  added_tmp=$(mktemp)
+  git log --reverse --diff-filter=A --name-only --pretty=format: "${range_base}..${range_head}" > "$added_tmp"
+  while IFS= read -r file; do
+    [[ -z "$file" ]] && continue
+    if is_fixture "$file"; then
+      continue
+    fi
+    rule=$(classify_name "${file##*/}")
+    if [[ -n "$rule" ]]; then
+      printf '%s\n' "${file}:1 ${rule}"
+      found=1
+    fi
+    warn_image "$file"
+  done < "$added_tmp"
+  rm -f "$added_tmp"
+fi
 
 cleanup_list
 trap - EXIT

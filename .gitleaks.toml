@@ -3,13 +3,23 @@ title = "shortcup privacy scan"
 [extend]
 useDefault = true
 
-# Filename rule. Home-directory paths are enforced by scripts/privacy-check.sh
-# on the scanned tree. A gitleaks git rule for those paths would also match
-# historical commits that already removed them.
 [[rules]]
 id = "keychain-password-file"
 description = "keychain password file"
 path = '''(?:^|/)keychain-password$'''
+
+[[rules]]
+id = "macos-user-path"
+description = "macOS home directory other than runner or Shared"
+regex = '''/Users/[A-Za-z0-9._-]+'''
+keywords = ["Users"]
+
+[[rules.allowlists]]
+regexTarget = "match"
+regexes = [
+  '''/Users/runner(?:/|$)''',
+  '''/Users/Shared(?:/|$)''',
+]
 
 [allowlist]
 description = "Obvious self-test fixtures. Copies outside this path must still be detected."
