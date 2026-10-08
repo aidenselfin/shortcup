@@ -35,6 +35,26 @@ EOF
   print "Built: $PWD/build/Shortcup Dev.app"
   exit 0
 fi
+if [[ "$mode" == "--fixture" ]]; then
+  mkdir -p "build/Shortcup Fixture.app/Contents/MacOS"
+  swiftc -module-cache-path build/module-cache Fixture/main.swift \
+    -o "build/Shortcup Fixture.app/Contents/MacOS/Fixture" -framework AppKit
+  cat > "build/Shortcup Fixture.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Fixture</string>
+<key>CFBundleIdentifier</key><string>com.shortcup.fixture</string>
+<key>CFBundleName</key><string>Shortcup Fixture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+EOF
+  codesign --force --sign - --identifier com.shortcup.fixture "build/Shortcup Fixture.app"
+  print "Built: $PWD/build/Shortcup Fixture.app"
+  exit 0
+fi
 mkdir -p build/Shortcup.app/Contents/MacOS
 swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
 minos="$(vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | awk '/minos/ { print $2; exit }')"
