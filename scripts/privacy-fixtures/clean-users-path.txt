@@ -1,0 +1,3 @@
+# fake self-test fixture
+/Users/runner/work/shortcup
+/Users/Shared/data

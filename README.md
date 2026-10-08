@@ -5,7 +5,7 @@
 ## 실행
 
 ```sh
-cd /Users/juhyeon/shortcup
+cd ~/shortcup
 zsh build.sh
 open build/Shortcup.app
 ```

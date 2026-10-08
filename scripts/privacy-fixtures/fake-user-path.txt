@@ -1,0 +1,2 @@
+# fake self-test fixture
+/Users/someone/fake-not-a-real-home
