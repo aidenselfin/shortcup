@@ -237,6 +237,9 @@ if /bin/zsh -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
     fi
   else
     note "FAIL: dev build failed"
+    if [[ -s build/verify/dev-build.log ]]; then
+      /usr/bin/tail -n 40 build/verify/dev-build.log | while IFS= read -r line; do note "  $line"; done
+    fi
     fail=$((fail + 1))
   fi
 else

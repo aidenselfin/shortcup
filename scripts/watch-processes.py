@@ -69,8 +69,12 @@ def libproc():
 
 
 def bsdinfo(lib, pid):
-    buf = ctypes.create_string_buffer(512)
-    n = lib.proc_pidinfo(int(pid), PROC_PIDTBSDINFO, 0, buf, 512)
+    size = 4096
+    buf = ctypes.create_string_buffer(size)
+    n = lib.proc_pidinfo(int(pid), PROC_PIDTBSDINFO, 0, buf, size)
+    if n > size:
+        buf = ctypes.create_string_buffer(n)
+        n = lib.proc_pidinfo(int(pid), PROC_PIDTBSDINFO, 0, buf, n)
     if n < 20:
         return None
     status = struct.unpack_from("<I", buf, 4)[0]

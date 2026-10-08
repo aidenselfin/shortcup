@@ -327,7 +327,8 @@ final class DevSelfTest {
     func postToFixture(_ point: CGPoint, _ type: CGEventType, pid: pid_t) {
         guard pid == fixturePID else { return }
         guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
-        event.postToPid(pid)
+        // CGEventPostToPid / Swift CGEvent.post(to:). Abort must not use the HID tap.
+        event.post(to: pid)
     }
 
     func elements(_ element: AXUIElement, _ name: String) -> [AXUIElement]? {

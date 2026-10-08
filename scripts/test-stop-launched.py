@@ -49,7 +49,8 @@ def alive(pid):
 
 
 def record(pid):
-    subprocess.run(HELPER + ["record", RECORD, str(pid)], check=True, capture_output=True, text=True)
+    result = subprocess.run(HELPER + ["record", RECORD, str(pid)], capture_output=True, text=True)
+    assert result.returncode == 0, "record failed: " + (result.stderr or "") + (result.stdout or "")
 
 
 def main():

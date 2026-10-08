@@ -27,6 +27,7 @@ from pathlib import Path
 
 PATH_MAX = 4096
 PROC_PIDTBSDINFO = 3
+PROC_PIDTASKALLINFO = 2
 SZOMB = 5
 
 _lib = None
@@ -70,8 +71,18 @@ def identity(pid):
     alive, not as dead.
     """
     pid = int(pid)
-    buf = ctypes.create_string_buffer(512)
-    n = libproc().proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, 512)
+    lib = libproc()
+    size = 4096
+    buf = ctypes.create_string_buffer(size)
+    n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, size)
+    if n > size:
+        buf = ctypes.create_string_buffer(n)
+        n = lib.proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, n)
+    if n < 144:
+        n = lib.proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, buf, size)
+        if n > size:
+            buf = ctypes.create_string_buffer(n)
+            n = lib.proc_pidinfo(pid, PROC_PIDTASKALLINFO, 0, buf, n)
     if n < 144:
         return None
     status = struct.unpack_from("<I", buf, 4)[0]
@@ -82,9 +93,8 @@ def identity(pid):
     for off in (128, 120):
         if n >= off + 16:
             sec, usec = struct.unpack_from("<QQ", buf, off)
-            if 1_000_000_000 <= sec <= 4_100_000_000 and usec < 1_000_000:
-                start_sec, start_usec = int(sec), int(usec)
-                break
+            start_sec, start_usec = int(sec), int(usec)
+            break
     if start_sec is None:
         return None
     return {
@@ -198,7 +208,7 @@ def spawn(record, command):
 def record_pid(record, pid):
     ident = identity(pid)
     if ident is None:
-        raise SystemExit("could not record pid " + str(pid))
+        raise SystemExit("could not record process identity")
     append_record(record, ident)
     return 0
 

@@ -680,7 +680,7 @@ def check_static_sources():
         problems.append("SelfTest click decision does not use the subrole at the point")
     if ".cghidEventTap" not in selftest:
         problems.append("SelfTest does not post through the HID tap")
-    if "postToPid" not in selftest:
+    if "post(to:" not in selftest and "postToPid" not in selftest and "CGEventPostToPid" not in selftest:
         problems.append("SelfTest abort path does not postToPid")
 
     app = Path("Sources/App.swift").read_text()
