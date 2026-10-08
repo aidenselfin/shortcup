@@ -4,3 +4,5 @@ Someone-Fake's MacBook fake self-test fixture
 Someone-Fake’s iPhone fake self-test fixture
 someone-MacBook-Pro.local fake self-test fixture
 AlicesFake-MacBook-Air fake self-test fixture
+someone-macbook-pro.local fake self-test fixture
+someone-imac.local fake self-test fixture

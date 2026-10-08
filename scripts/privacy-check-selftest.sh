@@ -39,6 +39,7 @@ fake_user="someone"
 fake_path="/Users/${fake_user}/fake-not-a-real-home"
 fake_device="Someone-Fake'""s MacBook"
 fake_host="${fake_user}-MacBook-Pro.local"
+fake_host_lc=$(printf '%s' "$fake_host" | tr '[:upper:]' '[:lower:]')
 pk_begin="BEGIN"
 pk_kind="FAKE PRIVATE KEY"
 
@@ -132,7 +133,7 @@ printf '# %s\n%s %s\n' "$marker" "$fake_token" "$marker" > "$repo/planted/fake-g
 printf '%s\n' "placeholder-not-a-password $marker" > "$repo/planted/keychain-password"
 cp "$fixtures/clean-users-path.txt" "$repo/clean/"
 printf '%s\n' "ok" > "$repo/planted/Users/$fake_user/notes.txt"
-printf '%s\n' "$fake_host" > "$repo/planted/hostname.txt"
+printf '%s\n%s\n' "$fake_host" "$fake_host_lc" > "$repo/planted/hostname.txt"
 printf '%s\n' "$fake_path/utf16" | iconv -f UTF-8 -t UTF-16 > "$repo/planted/utf16.txt"
 printf 'bin\000%s\000\n' "$fake_path/binary" > "$repo/planted/binary.dat"
 for name in 가짜인증서.p12 dev.pfx app.mobileprovision dist.provisionprofile Signing.certSigningRequest \
@@ -161,12 +162,15 @@ for n in 2 3 4; do
 done
 has planted/fake-device-name.txt host-device 5
 has planted/fake-device-name.txt host-device 6
+has planted/fake-device-name.txt host-device 7
+has planted/fake-device-name.txt host-device 8
 has planted/fake-github-token.txt github-token 2
 has planted/keychain-password forbidden-filename
 has "planted/Users/<redacted>/notes.txt" users-path-in-name 1
 has planted/utf16.txt users-path
 has planted/binary.dat users-path
-has planted/hostname.txt host-device
+has planted/hostname.txt host-device 1
+has planted/hostname.txt host-device 2
 for name in 가짜인증서.p12 dev.pfx app.mobileprovision dist.provisionprofile Signing.certSigningRequest \
   login.keychain login.keychain-db AuthKey.p8 .env.local .config/shortcup/settings.json \
   App.xcodeproj/xcuserdata/state.plist; do
@@ -192,9 +196,12 @@ for n in 2 3 4; do
 done
 has planted/fake-device-name.txt host-device 5
 has planted/fake-device-name.txt host-device 6
+has planted/fake-device-name.txt host-device 7
+has planted/fake-device-name.txt host-device 8
 has planted/fake-github-token.txt github-pat
 has planted/keychain-password keychain-password-file
-has planted/hostname.txt host-device
+has planted/hostname.txt host-device 1
+has planted/hostname.txt host-device 2
 has "planted/가짜인증서.p12" forbidden-filename
 has planted/.env.local forbidden-filename
 has scripts/privacy-fixtures/fake-user-path.txt macos-user-path 9
@@ -274,7 +281,7 @@ commit_all "$repo" "base"
 bin_base=$(git -C "$repo" rev-parse HEAD)
 printf 'bin\000%s\n' "$fake_path/binary-range" > "$repo/bin.dat"
 printf '%s\n' "$fake_path/utf16-range" | iconv -f UTF-8 -t UTF-16 > "$repo/utf16-le.txt"
-printf '%s\n\000%s\n%s\n' "-----BEGIN FAKE PRIVATE KEY-----" "FAKE-NOT-A-REAL-PRIVATE-KEY-MATERIAL-FAKE-NOT-A-REAL-PRIVATE-KEY-MATERIAL-" "-----END FAKE PRIVATE KEY-----" > "$repo/bin-key.txt"
+printf '%s\n\000%s\n%s\n' "-----${pk_begin} ${pk_kind}-----" "FAKE-NOT-A-REAL-PRIVATE-KEY-MATERIAL-FAKE-NOT-A-REAL-PRIVATE-KEY-MATERIAL-" "-----END ${pk_kind}-----" > "$repo/bin-key.txt"
 git -C "$repo" add -A
 git -C "$repo" commit -q -m "add binary fakes"
 git -C "$repo" rm -q -- bin.dat utf16-le.txt bin-key.txt

@@ -19,23 +19,12 @@ jobs:
       RANGE_AFTER: ${{ github.event.after }}
       PR_BASE: ${{ github.event.pull_request.base.sha }}
       PR_HEAD: ${{ github.event.pull_request.head.sha }}
-      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      # New-branch pushes send before=0. The check uses merge-base with origin/main,
-      # which is not the pushed ref, so fetch it separately. persist-credentials is
-      # off; this repo is public so the fetch does not need a token.
-      - name: Fetch default branch
-        run: |
-          set -euo pipefail
-          branch=${DEFAULT_BRANCH:-main}
-          git fetch --no-tags origin "+refs/heads/${branch}:refs/remotes/origin/${branch}" ||
-            echo "note: default branch ref not fetched" >&2
 
       - name: Install gitleaks
         run: |

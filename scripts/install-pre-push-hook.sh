@@ -83,16 +83,20 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   [[ "$local_sha" =~ $zero ]] && continue
   # Never HEAD or the working tree. New branch (remote sha all zeros): every
   # commit not already on this remote, and every file in the pushed commit.
-  # Force-push (remote sha missing or not an ancestor): from origin/main when
-  # that ref exists, otherwise the same new-branch range.
+  # Force-push (remote sha missing or not an ancestor): from this remote's HEAD
+  # branch when that ref exists, otherwise the same new-branch range.
   if [[ "$remote_sha" =~ $zero ]]; then
     set -- --new-branch "$local_sha" "$remote"
   elif ! git cat-file -e "${remote_sha}^{commit}" 2> /dev/null ||
     ! git merge-base --is-ancestor "$remote_sha" "$local_sha"; then
-    if git cat-file -e "refs/remotes/${remote}/main^{commit}" 2> /dev/null; then
-      set -- --range "$(git merge-base "refs/remotes/${remote}/main" "$local_sha")" "$local_sha"
-    elif git cat-file -e "origin/main^{commit}" 2> /dev/null; then
-      set -- --range "$(git merge-base origin/main "$local_sha")" "$local_sha"
+    remote_head=$(git symbolic-ref -q "refs/remotes/${remote}/HEAD" 2> /dev/null || true)
+    if [[ -n "$remote_head" ]] && git cat-file -e "${remote_head}^{commit}" 2> /dev/null; then
+      base=$(git merge-base "$remote_head" "$local_sha" 2> /dev/null || true)
+      if [[ -z "$base" ]]; then
+        echo "privacy hook: empty merge-base" >&2
+        exit 2
+      fi
+      set -- --range "$base" "$local_sha"
     else
       set -- --new-branch "$local_sha" "$remote"
     fi

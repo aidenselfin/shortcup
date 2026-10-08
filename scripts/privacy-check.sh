@@ -350,7 +350,7 @@ function report(where, n, text) {
   if (users_hit(text)) say(where, n, "users-path")
   if (home_hit(text)) say(where, n, "home-path")
   if (text ~ /(의|'s|’s) (Mac|MacBook|iMac|iPhone|iPad)/) say(where, n, "owner-device")
-  if (text ~ /[A-Za-z0-9]+-(MacBook|iMac|Mac-mini|Mac-Studio)(-Pro|-Air)?(\.local)?/) say(where, n, "host-device")
+  if (tolower(text) ~ /[a-z0-9]+-(macbook|imac|mac-mini|mac-studio)(-pro|-air)?(\.local)?/) say(where, n, "host-device")
   if (text ~ /BEGIN [A-Z ]*PRIVATE KEY/) say(where, n, "private-key")
   if (token_hit(text)) say(where, n, "github-token")
 }
@@ -538,26 +538,26 @@ run_gitleaks() {
   if [[ "$history" -eq 1 ]]; then
     local decoded="$work/decoded"
     mkdir -p "$decoded"
-    if [[ "$mode" == all ]]; then
-      git rev-list --all > "$work/commits"
-    else
-      git rev-list "${rev_args[@]}" > "$work/commits"
-    fi
+    git rev-list "${rev_args[@]}" > "$work/commits"
     while IFS= read -r commit; do
       [[ -n "$commit" ]] || continue
       git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
       while IFS= read -r -d '' file; do
         [[ -n "$file" ]] || continue
         [[ "$(git cat-file -t "${commit}:${file}" 2> /dev/null)" == blob ]] || continue
-        mkdir -p "$decoded/$(dirname "$file")"
-        decode_blob "$commit" "$file" "$decoded/$file"
+        mkdir -p "$decoded/${commit}/$(dirname "$file")"
+        decode_blob "$commit" "$file" "$decoded/${commit}/${file}"
       done < "$work/added"
     done < "$work/commits"
-    if find "$decoded" -type f -print -quit | grep -q .; then
+    if [[ -n "$(find "$decoded" -type f -print -quit 2> /dev/null)" ]]; then
       (
         cd "$decoded"
         run_one_gitleaks "$work/decoded.json" 0 dir .
       )
+      # Findings keep repo-relative names; the commit directory is only storage.
+      if [[ -s "$found_file" ]]; then
+        sed -E 's#^[0-9a-f]{40}/##' "$found_file" > "$work/stripped" && mv "$work/stripped" "$found_file"
+      fi
     fi
   fi
 }
