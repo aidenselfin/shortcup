@@ -25,6 +25,12 @@ Security.SecKeychainUnlock.argtypes = [KeychainRef, ctypes.c_uint32, ctypes.c_vo
 Security.SecKeychainUnlock.restype = ctypes.c_int32
 Security.SecKeychainLock.argtypes = [KeychainRef]
 Security.SecKeychainLock.restype = ctypes.c_int32
+Security.SecKeychainSetUserInteractionAllowed.argtypes = [ctypes.c_uint8]
+Security.SecKeychainSetUserInteractionAllowed.restype = ctypes.c_int32
+Security.SecTrustedApplicationCreateFromPath.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+Security.SecTrustedApplicationCreateFromPath.restype = ctypes.c_int32
+Security.SecAccessCreate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+Security.SecAccessCreate.restype = ctypes.c_int32
 Security.SecKeychainCreate.argtypes = [
     ctypes.c_char_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_uint8, ctypes.c_void_p, ctypes.POINTER(KeychainRef)
 ]
@@ -172,6 +178,38 @@ def fail(message, status=0):
     raise SystemExit(1)
 
 
+def deny_ui():
+    Security.SecKeychainSetUserInteractionAllowed(0)
+
+
+def grant_codesign_access(item, password):
+    """Allow /usr/bin/codesign to use the key without a GUI prompt."""
+    trusted = []
+    for path in (b"/usr/bin/codesign", b"/usr/bin/security"):
+        app = ctypes.c_void_p()
+        status = Security.SecTrustedApplicationCreateFromPath(path, ctypes.byref(app))
+        if status == 0 and app.value:
+            trusted.append(app)
+    if not trusted:
+        return False
+    arr = cf_array(trusted)
+    desc = cf_string("Shortcup Dev")
+    access = ctypes.c_void_p()
+    status = Security.SecAccessCreate(desc, arr, ctypes.byref(access))
+    CoreFoundation.CFRelease(desc)
+    CoreFoundation.CFRelease(arr)
+    for app in trusted:
+        CoreFoundation.CFRelease(app)
+    if status != 0 or not access.value:
+        return False
+    buffer = ctypes.create_string_buffer(password)
+    status = Security.SecKeychainItemSetAccessWithPassword(
+        item, access, len(password), ctypes.cast(buffer, ctypes.c_void_p)
+    )
+    CoreFoundation.CFRelease(access)
+    return status == 0
+
+
 def open_keychain(path):
     ref = KeychainRef()
     status = Security.SecKeychainOpen(path.encode(), ctypes.byref(ref))
@@ -283,9 +321,11 @@ def apply_partitions(item, partitions, password, set_ids):
     CoreFoundation.CFRelease(access)
     if status != 0:
         fail("could not set key access for the dedicated dev keychain", status)
+    grant_codesign_access(item, password)
 
 
 def set_partition_list_api(keychain_path, password):
+    deny_ui()
     set_ids = acl_set_partition_ids()
     if set_ids is None:
         raise RuntimeError("SecACLSetPartitionIDs is unavailable")
@@ -416,6 +456,30 @@ def match_security_prompt(line, keychain_path):
     return None
 
 
+def grant_identities_codesign(keychain_path, password):
+    deny_ui()
+    ref = open_keychain(keychain_path)
+    buffer = ctypes.create_string_buffer(password)
+    status = Security.SecKeychainUnlock(ref, len(password), ctypes.cast(buffer, ctypes.c_void_p), 1)
+    if status != 0:
+        finish(status, ref, "could not unlock the dedicated dev keychain")
+    identities, array_ref = copy_identities(ref)
+    try:
+        for identity in identities:
+            key = ctypes.c_void_p()
+            status = Security.SecIdentityCopyPrivateKey(identity, ctypes.byref(key))
+            if status != 0:
+                continue
+            try:
+                grant_codesign_access(key, password)
+            finally:
+                CoreFoundation.CFRelease(key)
+    finally:
+        if array_ref:
+            CoreFoundation.CFRelease(array_ref)
+        CoreFoundation.CFRelease(ref)
+
+
 def set_partition_list_security(keychain_path, password):
     """Drive /usr/bin/security without putting the password on argv.
 
@@ -433,7 +497,8 @@ def set_partition_list_security(keychain_path, password):
         "set-key-partition-list",
         "-S",
         "apple-tool:,apple:,codesign:",
-        "-s",
+        "-t",
+        "private",
         keychain_path,
     ]
     pid, fd = pty.fork()
@@ -640,6 +705,7 @@ def set_partition_list(keychain_path, password_file):
     except BaseException as exc:
         print("ERROR: Security API partition list failed: " + str(exc), file=sys.stderr)
     set_partition_list_security(keychain_path, password)
+    grant_identities_codesign(keychain_path, password)
     print("partition-list=ok")
 
 
@@ -680,6 +746,7 @@ def main():
         return
     ref = open_keychain(keychain_path)
     if command == "unlock":
+        deny_ui()
         status = Security.SecKeychainUnlock(ref, len(password), ctypes.cast(buffer, ctypes.c_void_p), 1)
         finish(status, ref, "could not unlock the dedicated dev keychain")
         return

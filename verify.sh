@@ -241,6 +241,9 @@ if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -
     else
       /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-lock-fail.log -- /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN" || true
       note "FAIL: codesign failed. See build/verify/codesign-sign.log"
+      if [[ -s build/verify/codesign-sign.log ]]; then
+        /usr/bin/tail -n 40 build/verify/codesign-sign.log | while IFS= read -r line; do note "  $line"; done
+      fi
       fail=$((fail + 1))
     fi
   else

@@ -8,7 +8,7 @@ CONF_DIR="${HOME}/.config/shortcup"
 PW_FILE="${CONF_DIR}/keychain-password"
 KEYCHAIN="${HOME}/Library/Keychains/shortcup-dev.keychain-db"
 MARKER="${CONF_DIR}/dev-identity-version"
-VERSION=3
+VERSION=4
 /bin/mkdir -p "$CONF_DIR"
 /bin/chmod 700 "$CONF_DIR"
 
@@ -108,7 +108,7 @@ EOF
   if ! keychain_in_search_list; then
     append_search_list
   fi
-  /usr/bin/security set-keychain-settings "$KEYCHAIN"
+  /usr/bin/security set-keychain-settings -t 21600 "$KEYCHAIN"
   /usr/bin/python3 "$PWD/scripts/keychain.py" unlock "$KEYCHAIN" "$PW_FILE"
   # PKCS#8 PEM keys do not pair with the certificate on import. A PKCS#12
   # does. Its wrapping password is random, lives in a temp file for openssl,
