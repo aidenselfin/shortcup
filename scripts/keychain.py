@@ -507,8 +507,7 @@ def set_partition_list_security(keychain_path, password):
         "set-key-partition-list",
         "-S",
         "apple-tool:,apple:,codesign:",
-        "-t",
-        "private",
+        "-s",
         keychain_path,
     ]
     pid, fd = pty.fork()
@@ -520,6 +519,7 @@ def set_partition_list_security(keychain_path, password):
         os._exit(127)
     sent = False
     prompt = b""
+    after = b""
     prompt_match = None
     bytes_got = 0
     child_status = None
@@ -541,6 +541,8 @@ def set_partition_list_security(keychain_path, password):
         extra = ""
         if not prompt_match:
             extra = " shape=" + prompt_shape(prompt, keychain_path)
+        elif after:
+            extra = " after=" + prompt_shape(after, keychain_path)
         print(
             "pty bytes="
             + str(bytes_got)
@@ -596,6 +598,8 @@ def set_partition_list_security(keychain_path, password):
                         os.write(fd, password + b"\n")
                         sent = True
                         prompt = b""
+                else:
+                    after += chunk
             if reap():
                 break
         if child_status is None:
