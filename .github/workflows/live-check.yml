@@ -2,6 +2,8 @@
 # Live fixture and selftest launch stay off until the PR #2 safety fixes are in this tree.
 # Pull requests and manual runs only. No fork-target trigger.
 # No GitHub Secrets, no dev certificate, no keychain, no TCC database edits.
+# `build.sh --dev` does not call setup-dev-signing.sh or touch any keychain. The only
+# signing is `codesign -s -` (ad-hoc) below. verify.sh is not run here.
 
 name: live-check
 
@@ -169,7 +171,7 @@ jobs:
 
       - name: Upload result JSON
         timeout-minutes: 2
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2 (node24)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: selftest-result
           path: build/verify/selftest.json
