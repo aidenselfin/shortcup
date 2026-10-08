@@ -219,7 +219,7 @@ note ""
 note "LAYER 1 signing"
 if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -- /bin/zsh -f setup-dev-signing.sh; then
   if [[ -s build/verify/signing-setup.log ]]; then
-    /usr/bin/grep -E 'partition-ids=|partition-list=|dump-lines=|pty |identity=' build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
+    /usr/bin/grep -E 'partition-ids=|partition-list=|dump-lines=|dump: |pty |identity=' build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
   fi
   if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/dev-build.log -- /bin/zsh -f build.sh --dev; then
     if /usr/bin/python3 scripts/check-dev-bundle.py --running "$DEV_APP"; then

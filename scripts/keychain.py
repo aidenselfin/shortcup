@@ -507,7 +507,6 @@ def set_partition_list_security(keychain_path, password):
         "set-key-partition-list",
         "-S",
         "apple-tool:,apple:,codesign:",
-        "-s",
         keychain_path,
     ]
     pid, fd = pty.fork()

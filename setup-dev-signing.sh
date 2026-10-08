@@ -134,6 +134,7 @@ EOF
   fi
   dump="$(/usr/bin/security dump-keychain "$KEYCHAIN" 2>/dev/null || true)"
   print -- "dump-lines=$(print -r -- "$dump" | /usr/bin/wc -l | /usr/bin/tr -d ' ')"
+  print -r -- "$dump" | /usr/bin/grep -E 'class:|labl:|type:|atyp:' | while IFS= read -r line; do print -- "dump: $line"; done
   parts="$(print -r -- "$dump" | /usr/bin/grep -ci partition || true)"
   print -- "partition-ids=${parts:-0}"
   if [[ "$(print -r -- "$dump" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -gt 10 && "${parts:-0}" == "0" ]]; then
