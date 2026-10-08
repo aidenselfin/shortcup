@@ -547,7 +547,7 @@ run_gitleaks() {
       git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
       while IFS= read -r -d '' file; do
         [[ -n "$file" ]] || continue
-        case $'\n'"$skip"$'\n' in
+        case $'\n'"$skip"$'\n'$'\n'"$fixture_paths"$'\n' in
           *$'\n'"$file"$'\n'*) continue ;;
         esac
         [[ "$(git cat-file -t "${commit}:${file}" 2> /dev/null)" == blob ]] || continue
