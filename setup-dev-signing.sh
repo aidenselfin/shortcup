@@ -80,11 +80,13 @@ EOF
   python3 "$PWD/scripts/keychain.py" unlock "$KEYCHAIN" "$PW_FILE"
   # PKCS#8 PEM keys do not pair with the certificate on import. A legacy PKCS#12
   # does. Its wrapping password is a temp file, not the keychain password.
-  # -A lets codesign use the key without set-key-partition-list, which prompts.
   umask 077
   print -n -- "import-once" > "$work/p12pass"
   openssl pkcs12 -export -legacy -inkey "$work/key.pem" -in "$work/cert.pem" -out "$work/dev.p12" -passout "file:$work/p12pass" >/dev/null
-  security import "$work/dev.p12" -k "$KEYCHAIN" -P import-once -A -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+  security import "$work/dev.p12" -k "$KEYCHAIN" -P import-once -T /usr/bin/codesign >/dev/null
+  # Without a partition list codesign would show an access prompt. Without -k,
+  # set-key-partition-list reads the keychain password from stdin, so it stays off argv.
+  security set-key-partition-list -S apple-tool:,apple:,codesign: -s "$KEYCHAIN" < "$PW_FILE" >/dev/null 2>&1
   python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN"
   rm -rf "$work"
   trap - EXIT
@@ -96,5 +98,5 @@ fi
 ensure_private_mode
 
 echo "identity=Shortcup Dev"
-echo "keychain=$KEYCHAIN"
+echo "keychain=~/Library/Keychains/${KEYCHAIN:t}"
 security find-identity -p codesigning "$KEYCHAIN"
