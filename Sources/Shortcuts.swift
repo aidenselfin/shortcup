@@ -57,6 +57,53 @@ func commandAliases(appID: String, role: String, label: String) -> [String] {
     return bindings.first { $0.0.contains(name) }?.1 ?? []
 }
 
+// Which menu item a traffic-light button corresponds to. The displayed shortcut
+// is read from that item; these titles are not the hint.
+struct WindowButtonQuery: Equatable {
+    let preferred: [String]
+    let fallback: [String]
+}
+
+func windowButtonQuery(role: String, subrole: String) -> WindowButtonQuery? {
+    guard role == "AXButton" else { return nil }
+    switch subrole {
+    case "AXCloseButton":
+        // Prefer the window command. "Close Tab" / "탭 닫기" is a different shortcut (⌘W).
+        return WindowButtonQuery(
+            preferred: ["close window", "윈도우 닫기", "창 닫기"],
+            fallback: ["close", "닫기"])
+    case "AXMinimizeButton":
+        return WindowButtonQuery(preferred: ["minimize", "minimise", "최소화"], fallback: [])
+    case "AXFullScreenButton":
+        return WindowButtonQuery(preferred: [
+            "enter full screen", "exit full screen", "make window full screen",
+            "전체 화면 시작", "전체 화면 종료", "윈도우를 전체 화면으로 전환",
+            "전체화면 열기", "전체화면 종료"
+        ], fallback: [])
+    case "AXZoomButton":
+        return WindowButtonQuery(preferred: ["zoom", "확대/축소"], fallback: [])
+    default:
+        return nil
+    }
+}
+
+// File holds Close Window. The Window menu holds minimize, zoom, and full screen.
+// "창" is Chrome's Korean Window menu; AppKit/Safari/Finder use "윈도우".
+func windowButtonMenuGroups(role: String, subrole: String) -> [String]? {
+    guard windowButtonQuery(role: role, subrole: subrole) != nil else { return nil }
+    return ["file", "파일", "window", "윈도우", "창"]
+}
+
+func resolveWindowButton(_ commands: [MenuCommand], role: String, subrole: String) -> MenuCommand? {
+    guard let query = windowButtonQuery(role: role, subrole: subrole) else { return nil }
+    if let command = resolveCommand(commands, aliases: query.preferred) { return command }
+    // A preferred item with no shortcut, or two preferred shortcuts, is not a guess.
+    let preferredNames = Set(query.preferred.map(normalized))
+    if commands.contains(where: { preferredNames.contains(normalized($0.title)) }) { return nil }
+    guard !query.fallback.isEmpty else { return nil }
+    return resolveCommand(commands, aliases: query.fallback)
+}
+
 func resolveCommand(_ commands: [MenuCommand], aliases: [String]) -> MenuCommand? {
     let names = Set(aliases.map(normalized))
     let matches = commands.filter { $0.enabled && $0.shortcut != nil && names.contains(normalized($0.title)) }

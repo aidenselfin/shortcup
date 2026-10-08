@@ -89,26 +89,48 @@ final class ClickListener {
               let runningApp = NSRunningApplication(processIdentifier: hitPID) else { return nil }
         let appID = runningApp.bundleIdentifier ?? ""
         let name = runningApp.localizedName ?? "앱"
-        probe("\(appID): \(axString(hit, kAXRoleAttribute))")
+        // The hit element does not inherit the system-wide timeout. A stuck target must not hang us.
+        AXUIElementSetMessagingTimeout(hit, 0.12)
+        let hitRole = axString(hit, kAXRoleAttribute)
+        let hitSubrole = axString(hit, kAXSubroleAttribute)
+        probe("\(appID): \(hitRole)\(hitSubrole.isEmpty ? "" : " / \(hitSubrole)")")
         let app = AXUIElementCreateApplication(hitPID)
         AXUIElementSetMessagingTimeout(app, 0.12)
 
         var node: AXUIElement? = hit
         var ancestors: [AXUIElement] = []
+        var roles: [String] = []
+        var windowMatch: (role: String, subrole: String)?
         for _ in 0..<12 {
             guard let current = node else { break }
+            AXUIElementSetMessagingTimeout(current, 0.12)
             ancestors.append(current)
             let role = axString(current, kAXRoleAttribute)
+            roles.append(role)
+            // Subrole identifies traffic lights. Menu clicks do not need it.
+            if role == kAXButtonRole {
+                let subrole = axString(current, kAXSubroleAttribute)
+                if windowMatch == nil, windowButtonQuery(role: role, subrole: subrole) != nil {
+                    windowMatch = (role, subrole)
+                }
+            }
             if role == kAXMenuItemRole {
                 guard (axValue(current, kAXEnabledAttribute) as? Bool) == true else { return nil }
                 let title = axString(current, kAXTitleAttribute)
                 guard !title.isEmpty, axChildren(current).isEmpty else { return nil }
                 return Hint(appID: appID, appName: name, title: title, shortcut: axShortcut(current), source: "menu")
             }
+            // Stop at the window. A traffic light inside a web area is not the window button.
+            if windowMatch != nil && (role == kAXWindowRole || role == "AXWebArea") { break }
             node = axElement(current, kAXParentAttribute)
         }
+        // Resolved on mouseDown from the clicked app's menu. No window title or AXValue.
+        if let windowMatch {
+            guard !roles.contains("AXWebArea") else { return nil }
+            return windowHint(app: app, appID: appID, name: name, role: windowMatch.role, subrole: windowMatch.subrole)
+        }
         // Web content can reuse browser labels. Never match a control inside AXWebArea.
-        guard !ancestors.contains(where: { axString($0, kAXRoleAttribute) == "AXWebArea" }) else { return nil }
+        guard !roles.contains("AXWebArea") else { return nil }
         let inToolbar = ancestors.contains(where: { axString($0, kAXRoleAttribute) == kAXToolbarRole })
         let chromeTabButton = appID == "com.google.Chrome" && ancestors.contains(where: { axString($0, kAXRoleAttribute) == kAXWindowRole }) &&
             axString(hit, kAXRoleAttribute) == kAXButtonRole && ["new tab", "새 탭"].contains(normalized(axString(hit, kAXTitleAttribute)))
@@ -130,13 +152,27 @@ final class ClickListener {
         return nil
     }
 
+    // mouseDown resolves the menu item. mouseUp only confirms the pointer did not drag away.
+    private func windowHint(app: AXUIElement, appID: String, name: String, role: String, subrole: String) -> Hint? {
+        guard let groups = windowButtonMenuGroups(role: role, subrole: subrole),
+              let query = windowButtonQuery(role: role, subrole: subrole) else { return nil }
+        let commands = menuCommands(app, aliases: query.preferred + query.fallback, groups: Set(groups))
+        guard let command = resolveWindowButton(commands, role: role, subrole: subrole), let shortcut = command.shortcut else {
+            probe("\(appID): \(subrole) / 메뉴 단축키 없음")
+            return nil
+        }
+        probe("\(appID): \(subrole) / \(command.title)=\(shortcut)")
+        return Hint(appID: appID, appName: name, title: command.title, shortcut: shortcut, source: "window")
+    }
+
     private func probe(_ message: String) { DispatchQueue.main.async { self.onProbe?(message) } }
 
-    private func menuCommands(_ app: AXUIElement, aliases: [String]) -> [MenuCommand] {
+    private func menuCommands(_ app: AXUIElement, aliases: [String], groups: Set<String>? = nil) -> [MenuCommand] {
         guard let menu = axElement(app, kAXMenuBarAttribute) else { return [] }
+        AXUIElementSetMessagingTimeout(menu, 0.12)
         var commands: [MenuCommand] = []
-        let groups = Set(["file", "파일", "edit", "편집", "수정", "view", "보기", "history", "방문 기록"])
-        var pending = axChildren(menu).filter { groups.contains(normalized(axString($0, kAXTitleAttribute))) }.map { ($0, 0) }
+        let menuGroups = groups ?? Set(["file", "파일", "edit", "편집", "수정", "view", "보기", "history", "방문 기록"])
+        var pending = axChildren(menu).filter { menuGroups.contains(normalized(axString($0, kAXTitleAttribute))) }.map { ($0, 0) }
         let names = Set(aliases.map(normalized))
         let deadline = Date().addingTimeInterval(1.2)
         var count = 0
@@ -144,6 +180,7 @@ final class ClickListener {
         while count < pending.count, count < 700, Date() < deadline {
             let (item, depth) = pending[count]
             count += 1
+            AXUIElementSetMessagingTimeout(item, 0.12)
             let title = axString(item, kAXTitleAttribute)
             if names.contains(normalized(title)), axString(item, kAXRoleAttribute) == kAXMenuItemRole {
                 commands.append(MenuCommand(title: title, shortcut: axShortcut(item), enabled: axValue(item, kAXEnabledAttribute) as? Bool == true))
@@ -276,8 +313,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             let hints = history.recent(for: activeID)
             if hints.isEmpty {
                 stack.addArrangedSubview(label("클릭을 단축키로", size: 15, weight: .semibold))
-                stack.addArrangedSubview(label("메뉴에서 작업을 선택해 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
-                stack.addArrangedSubview(label("Safari · Chrome · Finder\n브라우저 도구 막대 일부 지원", size: 12, color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("메뉴나 창 버튼을 눌러 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("Safari · Chrome · Finder\n창 버튼 · 브라우저 도구 막대 일부", size: 12, color: .secondaryLabelColor))
             }
             for hint in hints {
                 let row = NSStackView()
@@ -285,7 +322,8 @@ final class AppController: NSObject, NSApplicationDelegate {
                 row.addArrangedSubview(label(hint.title, size: 13, weight: .medium))
                 row.addArrangedSubview(label(hint.shortcut ?? "단축키 미지정", size: hint.shortcut == nil ? 13 : 22,
                                             weight: .semibold, color: hint.shortcut == nil ? .secondaryLabelColor : .labelColor))
-                row.addArrangedSubview(label(hint.source == "menu" ? "메뉴에서 확인" : "도구 막대 → 메뉴", size: 10, color: .secondaryLabelColor))
+                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : "도구 막대 → 메뉴")
+                row.addArrangedSubview(label(caption, size: 10, color: .secondaryLabelColor))
                 stack.addArrangedSubview(row)
             }
         }

@@ -24,6 +24,64 @@ import Foundation
         history.add(Hint(appID: "chrome", appName: "Chrome", title: "작업 3", shortcut: "⌘ T", source: "menu"))
         assert(history.recent(for: "chrome").map(\.title) == ["작업 3", "작업 4", "작업 2"])
         assert(history.recent(for: "finder").count == 1)
-        print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history")
+        let closeTab = shortcutText(character: "w", virtualKey: nil, glyph: nil, modifiers: 0)
+        let closeWindow = shortcutText(character: "w", virtualKey: nil, glyph: nil, modifiers: 1)
+        assert(closeTab == "⌘ W")
+        assert(closeWindow == "⇧⌘ W")
+        let safari = [
+            MenuCommand(title: "탭 닫기", shortcut: closeTab, enabled: true),
+            MenuCommand(title: "윈도우 닫기", shortcut: closeWindow, enabled: true),
+            MenuCommand(title: "모든 윈도우 닫기", shortcut: "⌥⌘ W", enabled: true)
+        ]
+        let safariHit = resolveWindowButton(safari, role: "AXButton", subrole: "AXCloseButton")
+        assert(safariHit?.title == "윈도우 닫기")
+        assert(safariHit?.shortcut == "⇧⌘ W")
+        let chrome = [
+            MenuCommand(title: "Close Tab", shortcut: "⌘ W", enabled: true),
+            MenuCommand(title: "Close Window", shortcut: "⇧⌘ W", enabled: true),
+            MenuCommand(title: "탭 닫기", shortcut: "⌘ W", enabled: true),
+            MenuCommand(title: "창 닫기", shortcut: "⇧⌘ W", enabled: true)
+        ]
+        assert(resolveWindowButton(chrome, role: "AXButton", subrole: "AXCloseButton")?.shortcut == "⇧⌘ W")
+        let closeWithoutShortcut = [
+            MenuCommand(title: "윈도우 닫기", shortcut: nil, enabled: true),
+            MenuCommand(title: "탭 닫기", shortcut: "⌘ W", enabled: true),
+            MenuCommand(title: "닫기", shortcut: "⌘ W", enabled: true)
+        ]
+        assert(resolveWindowButton(closeWithoutShortcut, role: "AXButton", subrole: "AXCloseButton") == nil)
+        let documentApp = [MenuCommand(title: "닫기", shortcut: "⌘ W", enabled: true)]
+        assert(resolveWindowButton(documentApp, role: "AXButton", subrole: "AXCloseButton")?.shortcut == "⌘ W")
+        let minimized = [
+            MenuCommand(title: "최소화", shortcut: "⌘ M", enabled: true),
+            MenuCommand(title: "모두 최소화", shortcut: "⌥⌘ M", enabled: true),
+            MenuCommand(title: "Minimise", shortcut: "⌘ M", enabled: true)
+        ]
+        assert(resolveWindowButton(minimized, role: "AXButton", subrole: "AXMinimizeButton")?.shortcut == "⌘ M")
+        let fullScreen = [
+            MenuCommand(title: "전체 화면 시작", shortcut: "⌃⌘ F", enabled: false),
+            MenuCommand(title: "전체 화면 종료", shortcut: "⌃⌘ F", enabled: true)
+        ]
+        assert(resolveWindowButton(fullScreen, role: "AXButton", subrole: "AXFullScreenButton")?.shortcut == "⌃⌘ F")
+        let conflicting = [
+            MenuCommand(title: "Enter Full Screen", shortcut: "⌃⌘ F", enabled: true),
+            MenuCommand(title: "Exit Full Screen", shortcut: "Fn F", enabled: true)
+        ]
+        assert(resolveWindowButton(conflicting, role: "AXButton", subrole: "AXFullScreenButton") == nil)
+        let disabledClose = [
+            MenuCommand(title: "Close Window", shortcut: "⇧⌘ W", enabled: false),
+            MenuCommand(title: "Close", shortcut: "⌘ W", enabled: true),
+            MenuCommand(title: "Close Tab", shortcut: "⌘ W", enabled: true)
+        ]
+        assert(resolveWindowButton(disabledClose, role: "AXButton", subrole: "AXCloseButton") == nil)
+        let exitOnly = [MenuCommand(title: "Exit Full Screen", shortcut: "⌃⌘ F", enabled: true)]
+        assert(resolveWindowButton(exitOnly, role: "AXButton", subrole: "AXFullScreenButton")?.title == "Exit Full Screen")
+        assert(resolveWindowButton(exitOnly, role: "AXButton", subrole: "AXZoomButton") == nil)
+        assert(resolveWindowButton([MenuCommand(title: "확대/축소", shortcut: nil, enabled: true)], role: "AXButton", subrole: "AXZoomButton") == nil)
+        assert(resolveWindowButton(safari, role: "AXButton", subrole: "AXToolbarButton") == nil)
+        assert(resolveWindowButton(safari, role: "AXMenuItem", subrole: "AXCloseButton") == nil)
+        assert(windowButtonMenuGroups(role: "AXButton", subrole: "AXCloseButton") == ["file", "파일", "window", "윈도우", "창"])
+        assert(windowButtonQuery(role: "AXButton", subrole: "AXCloseButton")?.preferred.contains("창 닫기") == true)
+        assert(windowButtonQuery(role: "AXButton", subrole: "AXCloseButton")?.preferred.contains("탭 닫기") == false)
+        print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history, window button mapping")
     }
 }
