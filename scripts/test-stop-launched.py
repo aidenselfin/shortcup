@@ -82,6 +82,9 @@ def main():
         assert alive(twin.pid), "an unrecorded process with the same executable must not be killed"
         assert alive(other.pid), "a process with another executable must not be killed"
 
+        missing = subprocess.run(HELPER + ["stop", str(WORK / "no-such-record.jsonl")], capture_output=True, text=True)
+        assert missing.returncode != 0, "stop must fail when the record file is missing"
+
         Path(RECORD).write_text("")
         c = subprocess.Popen([str(stubborn)])
         started.append(c)

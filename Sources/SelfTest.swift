@@ -223,13 +223,11 @@ final class DevSelfTest {
         try? await Task.sleep(nanoseconds: 60_000_000)
         // The listener's session tap only sees system-wide events, so the click is
         // posted there and checked again right before each half. If the point no
-        // longer belongs to a postable fixture element, mouse-up goes through the
-        // same HID tap at an empty, button-free spot inside the fixture window.
+        // longer belongs to a postable fixture element, mouse-up is posted only to
+        // the fixture pid. No HID tap and no window-center fallback on abort.
         guard permit(point, pid: pid) == .post else {
             listener.allowedRect = CGRect.null
-            if let safe = emptyReleasePoint(pid: pid) {
-                post(safe, .leftMouseUp)
-            }
+            postToFixture(point, .leftMouseUp, pid: pid)
             return row(subrole: subrole, identifier: identifier, shortcut: "", result: "fail")
         }
         post(point, .leftMouseUp)
@@ -326,43 +324,10 @@ final class DevSelfTest {
         event.post(tap: .cghidEventTap)
     }
 
-    // Mouse-up after an aborted down must not land on a button, or the control stays pressed.
-    func emptyReleasePoint(pid: pid_t) -> CGPoint? {
-        let frames = currentFixtureFrames(pid: pid)
-        var candidates: [CGPoint] = []
-        for frame in frames {
-            candidates.append(CGPoint(x: frame.x + frame.width * 0.55, y: frame.y + frame.height * 0.42))
-            candidates.append(CGPoint(x: frame.x + frame.width * 0.70, y: frame.y + frame.height * 0.50))
-            candidates.append(CGPoint(x: frame.x + frame.width * 0.40, y: frame.y + frame.height * 0.58))
-        }
-        for point in candidates {
-            let click = ClickPoint(x: point.x, y: point.y)
-            guard frames.contains(where: { $0.contains(click) }) else { continue }
-            if isButtonFreeSpot(point, pid: pid) { return point }
-        }
-        guard let frame = frames.first else { return nil }
-        return CGPoint(x: frame.x + frame.width * 0.5, y: frame.y + frame.height * 0.5)
-    }
-
-    func isButtonFreeSpot(_ point: CGPoint, pid: pid_t) -> Bool {
-        guard let system = hit(on: AXUIElementCreateSystemWide(), at: point), system.pid == pid else { return false }
-        guard let scoped = hit(on: AXUIElementCreateApplication(pid), at: point), scoped.pid == pid else { return false }
-        AXUIElementSetMessagingTimeout(scoped.element, axMessagingTimeout)
-        if string(scoped.element, "AXRole") == "AXButton" { return false }
-        var raw: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(scoped.element, AXAttr.subrole as CFString, &raw)
-        if case .value(let name) = subroleRead(errorCode: status.rawValue, value: raw as? String) {
-            if ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"].contains(name) {
-                return false
-            }
-        }
-        return true
-    }
-
-    func string(_ element: AXUIElement, _ name: String) -> String {
-        var value: CFTypeRef?
-        guard owned(element), AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return "" }
-        return value as? String ?? ""
+    func postToFixture(_ point: CGPoint, _ type: CGEventType, pid: pid_t) {
+        guard pid == fixturePID else { return }
+        guard let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) else { return }
+        event.postToPid(pid)
     }
 
     func elements(_ element: AXUIElement, _ name: String) -> [AXUIElement]? {

@@ -2,22 +2,22 @@
 set -eu
 cd "${0:A:h}"
 mode="${1:-product}"
-mkdir -p build/module-cache
-swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
+/bin/mkdir -p build/module-cache
+/usr/bin/swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
 ./build/checks
 if [[ "$mode" == "--checks-only" ]]; then
   print "Checks passed"
   exit 0
 fi
 if [[ "$mode" == "--dev" ]]; then
-  mkdir -p "build/Shortcup Dev.app/Contents/MacOS"
-  swiftc -D SHORTCUP_DEV -module-cache-path build/module-cache \
+  /bin/mkdir -p "build/Shortcup Dev.app/Contents/MacOS"
+  /usr/bin/swiftc -D SHORTCUP_DEV -module-cache-path build/module-cache \
     Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Sources/SelfTest.swift \
     -o "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" \
     -framework AppKit -framework ApplicationServices -framework Carbon
-  minos="$(vtool -show-build "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" | awk '/minos/ { print $2; exit }')"
+  minos="$(/usr/bin/vtool -show-build "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" | /usr/bin/awk '/minos/ { print $2; exit }')"
   [[ -n "$minos" ]]
-  cat > "build/Shortcup Dev.app/Contents/Info.plist" <<EOF
+  /bin/cat > "build/Shortcup Dev.app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -36,10 +36,10 @@ EOF
   exit 0
 fi
 if [[ "$mode" == "--fixture" ]]; then
-  mkdir -p "build/Shortcup Fixture.app/Contents/MacOS"
-  swiftc -module-cache-path build/module-cache Fixture/main.swift \
+  /bin/mkdir -p "build/Shortcup Fixture.app/Contents/MacOS"
+  /usr/bin/swiftc -module-cache-path build/module-cache Fixture/main.swift \
     -o "build/Shortcup Fixture.app/Contents/MacOS/Fixture" -framework AppKit
-  cat > "build/Shortcup Fixture.app/Contents/Info.plist" <<'EOF'
+  /bin/cat > "build/Shortcup Fixture.app/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -51,17 +51,17 @@ if [[ "$mode" == "--fixture" ]]; then
 <key>LSUIElement</key><true/>
 </dict></plist>
 EOF
-  codesign --force --sign - --identifier com.shortcup.fixture "build/Shortcup Fixture.app"
+  /usr/bin/codesign --force --sign - --identifier com.shortcup.fixture "build/Shortcup Fixture.app"
   print "Built: $PWD/build/Shortcup Fixture.app"
   exit 0
 fi
-mkdir -p build/Shortcup.app/Contents/MacOS
-swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
-minos="$(vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | awk '/minos/ { print $2; exit }')"
+/bin/mkdir -p build/Shortcup.app/Contents/MacOS
+/usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
+minos="$(/usr/bin/vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | /usr/bin/awk '/minos/ { print $2; exit }')"
 [[ -n "$minos" ]]
 # Keep the checked-in plist in sync with the binary before copying it into the bundle.
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minos" Info.plist
-cp Info.plist build/Shortcup.app/Contents/Info.plist
-codesign --force --sign - --identifier com.shortcup.app build/Shortcup.app
-touch build/Shortcup.app
+/bin/cp Info.plist build/Shortcup.app/Contents/Info.plist
+/usr/bin/codesign --force --sign - --identifier com.shortcup.app build/Shortcup.app
+/usr/bin/touch build/Shortcup.app
 print "Built: $PWD/build/Shortcup.app"

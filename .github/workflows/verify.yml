@@ -4,6 +4,7 @@ name: verify
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -27,11 +28,32 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
+      - name: Install pinned ripgrep
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          VERSION=14.1.1
+          ARCHIVE="ripgrep-${VERSION}-aarch64-apple-darwin.tar.gz"
+          URL="https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${ARCHIVE}"
+          SHA256=24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be
+          TMP="$(/usr/bin/mktemp)"
+          /usr/bin/curl -sSL -o "$TMP" "$URL"
+          echo "${SHA256}  ${TMP}" | /usr/bin/shasum -a 256 -c -
+          /usr/bin/tar -xzf "$TMP" -C /tmp
+          DEST=/opt/homebrew/bin
+          if [[ ! -d "$DEST" ]]; then
+            DEST=/usr/local/bin
+            /bin/mkdir -p "$DEST"
+          fi
+          /bin/cp "/tmp/ripgrep-${VERSION}-aarch64-apple-darwin/rg" "$DEST/rg"
+          /bin/chmod 755 "$DEST/rg"
+          # Official darwin builds link Homebrew pcre2.
+          if [[ ! -f /opt/homebrew/opt/pcre2/lib/libpcre2-8.0.dylib ]]; then
+            brew install pcre2
+          fi
+
       - name: SAFE verify
         timeout-minutes: 18
         run: |
           set -euo pipefail
-          if [[ ! -x /opt/homebrew/bin/rg && ! -x /usr/local/bin/rg && ! -x /usr/bin/rg ]]; then
-            brew install ripgrep
-          fi
           /usr/bin/python3 scripts/watch-processes.py -- /bin/zsh -f verify.sh

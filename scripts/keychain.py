@@ -6,6 +6,7 @@ set-partition-list uses the Security API so the keychain password is not placed
 on argv and getpass() is never called on /dev/tty.
 """
 import ctypes
+import errno
 import os
 import pty
 import select
@@ -67,6 +68,38 @@ CoreFoundation.CFGetTypeID.argtypes = [ctypes.c_void_p]
 CoreFoundation.CFGetTypeID.restype = ctypes.c_ulong
 CoreFoundation.CFArrayGetTypeID.argtypes = []
 CoreFoundation.CFArrayGetTypeID.restype = ctypes.c_ulong
+CoreFoundation.CFDataCreate.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_long]
+CoreFoundation.CFDataCreate.restype = ctypes.c_void_p
+Security.SecPKCS12Import.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+Security.SecPKCS12Import.restype = ctypes.c_int32
+Security.SecItemImport.argtypes = [
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.c_uint32,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_void_p),
+]
+Security.SecItemImport.restype = ctypes.c_int32
+
+kSecFormatPKCS12 = 13
+kSecItemTypeAggregate = 5
+SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION = 0
+
+
+class SecItemImportExportKeyParameters(ctypes.Structure):
+    _fields_ = [
+        ("version", ctypes.c_uint32),
+        ("flags", ctypes.c_uint32),
+        ("passphrase", ctypes.c_void_p),
+        ("alertTitle", ctypes.c_void_p),
+        ("alertPrompt", ctypes.c_void_p),
+        ("accessRef", ctypes.c_void_p),
+        ("keyUsage", ctypes.c_void_p),
+        ("keyAttributes", ctypes.c_void_p),
+    ]
 
 kCFStringEncodingUTF8 = 0x08000100
 errSecItemNotFound = -25300
@@ -196,13 +229,20 @@ def copy_identities(keychain):
         return [], None
     if status != 0:
         fail("could not find a signing identity in the dedicated dev keychain", status)
-    if CoreFoundation.CFGetTypeID(result) != CoreFoundation.CFArrayGetTypeID():
-        return [result], result
+    holder = result.value
+    if not holder:
+        fail("identity lookup returned no value")
+    # One CFRelease of `owned` in the caller. List entries are borrowed: when
+    # the match is a single identity (not a CFArray), do not wrap it and also
+    # release it as an array.
+    owned = ctypes.c_void_p(holder)
+    if CoreFoundation.CFGetTypeID(holder) != CoreFoundation.CFArrayGetTypeID():
+        return [owned], owned
     items = []
-    count = CoreFoundation.CFArrayGetCount(result)
+    count = CoreFoundation.CFArrayGetCount(owned)
     for index in range(count):
-        items.append(CoreFoundation.CFArrayGetValueAtIndex(result, index))
-    return items, result
+        items.append(ctypes.c_void_p(CoreFoundation.CFArrayGetValueAtIndex(owned, index)))
+    return items, owned
 
 
 def acl_set_partition_ids():
@@ -277,12 +317,21 @@ def set_partition_list_api(keychain_path, password):
         CoreFoundation.CFRelease(ref)
 
 
+def _child_exit_code(status):
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return 1
+    return 1
+
+
 def set_partition_list_security(keychain_path, password):
     """Drive /usr/bin/security without putting the password on argv.
 
     security set-key-partition-list without -k calls getpass() on its
     controlling tty. A private pty is that tty, so this does not hang and
-    does not prompt on the caller's terminal.
+    does not prompt on the caller's terminal. The password is written only
+    after a prompt that contains "password". Raw pty bytes are never logged.
     """
     argv = [
         "/usr/bin/security",
@@ -297,37 +346,150 @@ def set_partition_list_security(keychain_path, password):
         os.execv(argv[0], argv)
         os._exit(127)
     sent = False
+    prompt = b""
+    child_status = None
     deadline = time.monotonic() + 20
+
+    def reap(hang=False):
+        nonlocal child_status
+        if child_status is not None:
+            return True
+        flags = 0 if hang else os.WNOHANG
+        try:
+            waited, status = os.waitpid(pid, flags)
+        except OSError:
+            return False
+        if waited == pid:
+            child_status = status
+            return True
+        return False
+
     try:
         while time.monotonic() < deadline:
-            ready, _, _ = select.select([fd], [], [], 0.2)
+            remaining = max(0.0, deadline - time.monotonic())
+            ready, _, _ = select.select([fd], [], [], min(0.2, remaining if remaining else 0.0))
             if ready:
                 try:
                     chunk = os.read(fd, 1024)
-                except OSError:
+                except OSError as exc:
                     chunk = b""
+                    if exc.errno not in (errno.EIO, errno.EAGAIN, errno.EINTR, errno.EBADF):
+                        chunk = b""
                 if not chunk:
-                    break
+                    # EOF/EIO: keep waitpid until the deadline, then SIGKILL
+                    # only if the child is still running.
+                    if reap():
+                        break
+                    time.sleep(0.05)
+                    continue
                 if not sent:
-                    os.write(fd, password + b"\n")
-                    sent = True
-            waited, status = os.waitpid(pid, os.WNOHANG)
-            if waited == pid:
-                if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
-                    return
-                code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
-                fail("security set-key-partition-list failed", code)
-        fail("security set-key-partition-list did not finish")
+                    prompt += chunk.lower()
+                    if b"password" in prompt:
+                        os.write(fd, password + b"\n")
+                        sent = True
+                        prompt = b""
+            if reap():
+                break
+        if child_status is None:
+            if reap():
+                pass
+            else:
+                try:
+                    os.kill(pid, 9)
+                except OSError:
+                    pass
+                reap(hang=True)
+                fail("security set-key-partition-list did not finish")
+        if child_status is None:
+            fail("security set-key-partition-list did not finish")
+        code = _child_exit_code(child_status)
+        if code == 0:
+            return
+        fail("security set-key-partition-list failed")
     finally:
         try:
             os.close(fd)
         except OSError:
             pass
-        try:
-            os.kill(pid, 9)
-            os.waitpid(pid, 0)
-        except OSError:
-            pass
+        if child_status is None:
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except OSError:
+                pass
+
+
+def cf_data(raw):
+    buf = (ctypes.c_char * len(raw)).from_buffer_copy(raw)
+    ref = CoreFoundation.CFDataCreate(None, buf, len(raw))
+    if not ref:
+        fail("could not allocate PKCS#12 data")
+    return ref
+
+
+def import_p12(keychain_path, keychain_password_file, p12_path, p12_password_file):
+    """Import a PKCS#12 blob through the Security API. The wrapping password
+    stays in memory; it is never placed on argv.
+    """
+    keychain_password = password_bytes(keychain_password_file)
+    p12_password = password_bytes(p12_password_file)
+    raw = Path(p12_path).read_bytes()
+    if not raw:
+        fail("PKCS#12 file is empty")
+    ref = open_keychain(keychain_path)
+    buffer = ctypes.create_string_buffer(keychain_password)
+    status = Security.SecKeychainUnlock(ref, len(keychain_password), ctypes.cast(buffer, ctypes.c_void_p), 1)
+    if status != 0:
+        finish(status, ref, "could not unlock the dedicated dev keychain")
+    data_ref = cf_data(raw)
+    pass_ref = cf_string(p12_password.decode("utf-8", "strict"))
+    keys = CFDictionaryKeyCallBacks.in_dll(CoreFoundation, "kCFTypeDictionaryKeyCallBacks")
+    values = CFDictionaryValueCallBacks.in_dll(CoreFoundation, "kCFTypeDictionaryValueCallBacks")
+    options = CoreFoundation.CFDictionaryCreateMutable(None, 0, ctypes.byref(keys), ctypes.byref(values))
+    CoreFoundation.CFDictionarySetValue(options, sec_const("kSecImportExportPassphrase"), pass_ref)
+    CoreFoundation.CFDictionarySetValue(options, sec_const("kSecImportExportKeychain"), ref)
+    items = ctypes.c_void_p()
+    status = Security.SecPKCS12Import(data_ref, options, ctypes.byref(items))
+    if status != 0:
+        # SecItemImport with the passphrase in keyParams, still not on argv.
+        fmt = ctypes.c_uint32(kSecFormatPKCS12)
+        kind = ctypes.c_uint32(kSecItemTypeAggregate)
+        params = SecItemImportExportKeyParameters()
+        params.version = SEC_KEY_IMPORT_EXPORT_PARAMS_VERSION
+        params.flags = 0
+        params.passphrase = pass_ref
+        params.alertTitle = None
+        params.alertPrompt = None
+        params.accessRef = None
+        params.keyUsage = None
+        params.keyAttributes = None
+        ext = cf_string("p12")
+        imported = ctypes.c_void_p()
+        status = Security.SecItemImport(
+            data_ref,
+            ext,
+            ctypes.byref(fmt),
+            ctypes.byref(kind),
+            0,
+            ctypes.byref(params),
+            ref,
+            ctypes.byref(imported),
+        )
+        CoreFoundation.CFRelease(ext)
+        if imported.value:
+            CoreFoundation.CFRelease(imported)
+    CoreFoundation.CFRelease(options)
+    CoreFoundation.CFRelease(pass_ref)
+    CoreFoundation.CFRelease(data_ref)
+    if status != 0:
+        finish(status, ref, "could not import the dedicated signing identity")
+    if items.value:
+        CoreFoundation.CFRelease(items)
+    CoreFoundation.CFRelease(ref)
+    print("import-p12=ok")
 
 
 def set_partition_list(keychain_path, password_file):
@@ -347,7 +509,8 @@ def set_partition_list(keychain_path, password_file):
 def main():
     if len(sys.argv) < 3:
         raise SystemExit(
-            "usage: keychain.py unlock|create|set-partition-list <keychain> <password-file> | lock <keychain>"
+            "usage: keychain.py unlock|create|set-partition-list <keychain> <password-file> | "
+            "lock <keychain> | import-p12 <keychain> <password-file> <p12-file> <p12-password-file>"
         )
     command, keychain_path = sys.argv[1], sys.argv[2]
     if command == "lock":
@@ -355,6 +518,13 @@ def main():
             raise SystemExit("usage: keychain.py lock <keychain>")
         ref = open_keychain(keychain_path)
         finish(Security.SecKeychainLock(ref), ref, "could not lock the dedicated dev keychain")
+        return
+    if command == "import-p12":
+        if len(sys.argv) != 6:
+            raise SystemExit(
+                "usage: keychain.py import-p12 <keychain> <password-file> <p12-file> <p12-password-file>"
+            )
+        import_p12(sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5])
         return
     if len(sys.argv) != 4:
         raise SystemExit("usage: keychain.py unlock|create|set-partition-list <keychain> <password-file>")

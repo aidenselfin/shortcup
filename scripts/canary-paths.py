@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 IDS = ("com.shortcup.dev", "com.shortcup.app")
+SHORTCUP_FOLDERS = ("Shortcup Dev", "Shortcup")
 SKIP_CONFIG = {"verify-canary", "keychain-password"}
 VALIDATION_FILES = ("validation-events.jsonl", "validation-state.json")
 
@@ -41,9 +42,9 @@ def scan_roots():
     support = base / "Library" / "Application Support"
     logs = base / "Library" / "Logs"
     if support.is_dir():
-        roots.extend(sorted(p for p in support.glob("Shortcup*") if p.name.startswith("Shortcup")))
+        roots.extend(sorted(support / name for name in SHORTCUP_FOLDERS if (support / name).exists()))
     if logs.is_dir():
-        roots.extend(sorted(p for p in logs.glob("Shortcup*") if p.name.startswith("Shortcup")))
+        roots.extend(sorted(logs / name for name in SHORTCUP_FOLDERS if (logs / name).exists()))
     config = base / ".config" / "shortcup"
     if config.is_dir():
         for item in sorted(config.iterdir()):
@@ -67,7 +68,7 @@ def is_allowed(path):
             relative = _norm(path).relative_to(_norm(parent))
         except ValueError:
             relative = None
-        if relative is not None and relative.parts and relative.parts[0].startswith("Shortcup"):
+        if relative is not None and relative.parts and relative.parts[0] in SHORTCUP_FOLDERS:
             return True
     config = base / ".config" / "shortcup"
     try:

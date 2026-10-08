@@ -6,25 +6,19 @@
 set -euo pipefail
 cd "${0:A:h}"
 
-PYTHON=/usr/bin/python3
-ZSH=/bin/zsh
-GIT=/usr/bin/git
-GREP=/usr/bin/grep
-SWIFTC=/usr/bin/swiftc
-CODESIGN=/usr/bin/codesign
-OPENSSL=/usr/bin/openssl
-STAT=/usr/bin/stat
-MKTEMP=/usr/bin/mktemp
-NM=/usr/bin/nm
-STRINGS=/usr/bin/strings
-VTOOL=/usr/bin/vtool
-if [[ -x /opt/homebrew/bin/rg ]]; then
-  RG=/opt/homebrew/bin/rg
-elif [[ -x /usr/local/bin/rg ]]; then
-  RG=/usr/local/bin/rg
-elif [[ -x /usr/bin/rg ]]; then
-  RG=/usr/bin/rg
-else
+run_rg() {
+  if [[ -x /opt/homebrew/bin/rg ]]; then
+    /opt/homebrew/bin/rg "$@"
+  elif [[ -x /usr/local/bin/rg ]]; then
+    /usr/local/bin/rg "$@"
+  elif [[ -x /usr/bin/rg ]]; then
+    /usr/bin/rg "$@"
+  else
+    print -- "FAIL: rg is not installed"
+    return 127
+  fi
+}
+if ! run_rg --version >/dev/null 2>&1; then
   print -- "FAIL: rg is not installed"
   exit 1
 fi
@@ -77,8 +71,8 @@ note ""
 
 # --- secrets and static checks (no Accessibility, no launch) ---
 tracked=""
-if tracked="$("$GIT" ls-files)"; then
-  if print -r -- "$tracked" | "$GREP" -E '\.(p12|pem|key)$|keychain-password|dev-key' >/dev/null; then
+if tracked="$(/usr/bin/git ls-files)"; then
+  if print -r -- "$tracked" | /usr/bin/grep -E '\.(p12|pem|key)$|keychain-password|dev-key' >/dev/null; then
     note "CRITICAL: a private key or password file is tracked in git"
     fail=$((fail + 1))
   else
@@ -89,60 +83,60 @@ else
   fail=$((fail + 1))
 fi
 
-if "$GREP" -R -E 'URLSession|import Network|NWConnection|NSURLConnection' Sources Fixture >/dev/null; then
+if /usr/bin/grep -R -E 'URLSession|import Network|NWConnection|NSURLConnection' Sources Fixture >/dev/null; then
   note "CRITICAL: network API referenced in Sources or Fixture"
   fail=$((fail + 1))
 else
   note "PASS: no URLSession or Network framework usage"
 fi
 
-if "$GREP" -E 'keyDown|keyUp|flagsChanged' Sources/App.swift Sources/Detect.swift Sources/SelfTest.swift >/dev/null; then
+if /usr/bin/grep -E 'keyDown|keyUp|flagsChanged' Sources/App.swift Sources/Detect.swift Sources/SelfTest.swift >/dev/null; then
   note "CRITICAL: key event monitor found in the listener sources"
   fail=$((fail + 1))
 else
   note "PASS: listener sources have no keyDown, keyUp, or flagsChanged"
 fi
-if "$GREP" -n 'tapCreate' -A 2 Sources/App.swift | "$GREP" -q 'listenOnly'; then
+if /usr/bin/grep -n 'tapCreate' -A 2 Sources/App.swift | /usr/bin/grep -q 'listenOnly'; then
   note "PASS: event tap is listenOnly for mouse down, up, and drag"
 else
   note "CRITICAL: event tap is missing or not listenOnly"
   fail=$((fail + 1))
 fi
-if "$GREP" -n 'AXUIElementSetAttributeValue' Sources/App.swift Sources/Detect.swift Sources/SelfTest.swift Sources/Shortcuts.swift >/dev/null; then
+if /usr/bin/grep -n 'AXUIElementSetAttributeValue' Sources/App.swift Sources/Detect.swift Sources/SelfTest.swift Sources/Shortcuts.swift >/dev/null; then
   note "CRITICAL: AXUIElementSetAttributeValue is in the product or selftest path"
   fail=$((fail + 1))
 fi
-if "$GREP" -n 'AXUIElementSetAttributeValue' Sources/Validation.swift >/dev/null; then
+if /usr/bin/grep -n 'AXUIElementSetAttributeValue' Sources/Validation.swift >/dev/null; then
   note "KNOWN-FAIL: legacy --validate-once still sets an address-field value. verify.sh does not run it. Expected until a later cleanup."
   known=$((known + 1))
 fi
-if "$GREP" -n 'hint.title' Sources/App.swift >/dev/null; then
+if /usr/bin/grep -n 'hint.title' Sources/App.swift >/dev/null; then
   note "KNOWN-FAIL: menu and toolbar validation logs still store command titles (validation-events.jsonl). Expected until the v0.1 fix."
   known=$((known + 1))
 fi
-if "$PYTHON" scripts/test-launch-guard.py > build/verify/launch-guard-test.txt 2>&1; then
-  note "$(cat build/verify/launch-guard-test.txt)"
+if /usr/bin/python3 scripts/test-launch-guard.py > build/verify/launch-guard-test.txt 2>&1; then
+  note "$(/bin/cat build/verify/launch-guard-test.txt)"
 else
   note "FAIL: launch guard cases"
   while IFS= read -r line; do note "  $line"; done < build/verify/launch-guard-test.txt
   fail=$((fail + 1))
 fi
 # Command-line stubs outside build/. No app is started.
-if "$PYTHON" scripts/test-stop-launched.py > build/verify/stop-test.txt 2>&1; then
+if /usr/bin/python3 scripts/test-stop-launched.py > build/verify/stop-test.txt 2>&1; then
   note "$(/usr/bin/tail -n 1 build/verify/stop-test.txt)"
 else
   note "FAIL: hung-run stop helper"
   /usr/bin/tail -n 20 build/verify/stop-test.txt | while IFS= read -r line; do note "  $line"; done
   fail=$((fail + 1))
 fi
-if "$PYTHON" scripts/test-canary-paths.py > build/verify/canary-paths-test.txt 2>&1; then
-  note "$(cat build/verify/canary-paths-test.txt)"
+if /usr/bin/python3 scripts/test-canary-paths.py > build/verify/canary-paths-test.txt 2>&1; then
+  note "$(/bin/cat build/verify/canary-paths-test.txt)"
 else
   note "FAIL: canary path cases"
   while IFS= read -r line; do note "  $line"; done < build/verify/canary-paths-test.txt
   fail=$((fail + 1))
 fi
-if "$PYTHON" scripts/check-launch-guard.py > build/verify/launch-guard.txt 2>&1; then
+if /usr/bin/python3 scripts/check-launch-guard.py > build/verify/launch-guard.txt 2>&1; then
   note "PASS: app launch is only in the live script, and SAFE files have no launch primitives"
 else
   note "CRITICAL: verify.sh can launch an app without --live, or a launch method is missing"
@@ -154,7 +148,7 @@ fi
 
 note ""
 note "LAYER 2 snapshots"
-if "$ZSH" -f build.sh --checks-only > build/verify/checks.log 2>&1; then
+if /bin/zsh -f build.sh --checks-only > build/verify/checks.log 2>&1; then
   note "PASS: snapshot replay, glyph table, locale, cache, and AX allow-list"
 else
   note "FAIL: permission-free checks"
@@ -165,23 +159,23 @@ else
 fi
 
 /bin/mkdir -p build/product-link
-if "$SWIFTC" -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift \
+if /usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift \
     -o build/product-link/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon \
     > build/verify/product-link.log 2>&1; then
-  if "$GREP" -q 'will never be executed' build/verify/product-link.log; then
+  if /usr/bin/grep -q 'will never be executed' build/verify/product-link.log; then
     note "FAIL: product build still has a dead self-test branch"
     fail=$((fail + 1))
-  elif "$STRINGS" -a build/product-link/Shortcup | "$GREP" -q 'com.shortcup.fixture'; then
+  elif /usr/bin/strings -a build/product-link/Shortcup | /usr/bin/grep -q 'com.shortcup.fixture'; then
     note "CRITICAL: product binary contains the fixture selftest"
     fail=$((fail + 1))
-  elif "$NM" build/product-link/Shortcup | "$GREP" -q 'ForTesting'; then
+  elif /usr/bin/nm build/product-link/Shortcup | /usr/bin/grep -q 'ForTesting'; then
     note "FAIL: product binary exposes a ForTesting hook"
     fail=$((fail + 1))
   else
     note "PASS: product build has no fixture selftest and no dead self-test branch"
   fi
   repo_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist 2>/dev/null || true)"
-  bin_min="$("$VTOOL" -show-build build/product-link/Shortcup 2>/dev/null | /usr/bin/awk '/minos/ { print $2; exit }' || true)"
+  bin_min="$(/usr/bin/vtool -show-build build/product-link/Shortcup 2>/dev/null | /usr/bin/awk '/minos/ { print $2; exit }' || true)"
   if [[ -n "$repo_min" && "$repo_min" == "$bin_min" ]]; then
     note "PASS: repo LSMinimumSystemVersion $repo_min matches the product-link binary"
   else
@@ -196,16 +190,16 @@ fi
 note ""
 note "JSON schema allow-list"
 schema_dir="build/verify/schema"
-"$PYTHON" scripts/write-schema-samples.py "$schema_dir"
-if "$PYTHON" scripts/check-selftest-json.py "$schema_dir/skipped.json" > build/verify/schema-ok.txt \
-  && "$PYTHON" scripts/check-selftest-json.py "$schema_dir/skipped-direct.json" >> build/verify/schema-ok.txt \
-  && "$PYTHON" scripts/check-selftest-json.py "$schema_dir/pass.json" >> build/verify/schema-ok.txt \
-  && "$PYTHON" scripts/check-selftest-json.py "$schema_dir/skip-case.json" >> build/verify/schema-ok.txt \
-  && ! "$PYTHON" scripts/check-selftest-json.py "$schema_dir/extra.json" >/dev/null 2>&1 \
-  && ! "$PYTHON" scripts/check-selftest-json.py "$schema_dir/bool-int.json" >/dev/null 2>&1 \
-  && ! "$PYTHON" scripts/check-selftest-json.py "$schema_dir/nested.json" >/dev/null 2>&1 \
-  && ! "$PYTHON" scripts/check-selftest-json.py "$schema_dir/bad-launch.json" >/dev/null 2>&1 \
-  && ! "$PYTHON" scripts/check-selftest-json.py "$schema_dir/mismatch.json" >/dev/null 2>&1; then
+/usr/bin/python3 scripts/write-schema-samples.py "$schema_dir"
+if /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/skipped.json" > build/verify/schema-ok.txt \
+  && /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/skipped-direct.json" >> build/verify/schema-ok.txt \
+  && /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/pass.json" >> build/verify/schema-ok.txt \
+  && /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/skip-case.json" >> build/verify/schema-ok.txt \
+  && ! /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/extra.json" >/dev/null 2>&1 \
+  && ! /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/bool-int.json" >/dev/null 2>&1 \
+  && ! /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/nested.json" >/dev/null 2>&1 \
+  && ! /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/bad-launch.json" >/dev/null 2>&1 \
+  && ! /usr/bin/python3 scripts/check-selftest-json.py "$schema_dir/mismatch.json" >/dev/null 2>&1; then
   note "PASS: selftest JSON allow-list accepts axTrusted and launchMethod, rejects extra keys, bools-as-ints, and nested extras"
 else
   note "FAIL: selftest JSON allow-list"
@@ -214,21 +208,21 @@ fi
 
 note ""
 note "LAYER 1 signing"
-if "$ZSH" -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
-  if "$ZSH" -f build.sh --dev > build/verify/dev-build.log 2>&1; then
-    if "$PYTHON" scripts/check-dev-bundle.py --running "$DEV_APP"; then
+if /bin/zsh -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
+  if /bin/zsh -f build.sh --dev > build/verify/dev-build.log 2>&1; then
+    if /usr/bin/python3 scripts/check-dev-bundle.py --running "$DEV_APP"; then
       note "FAIL: Shortcup Dev build is already running. This script will not quit it or sign over it."
       fail=$((fail + 1))
-    elif "$PYTHON" scripts/keychain.py unlock "$KEYCHAIN" "$PW_FILE" \
-      && "$CODESIGN" --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP" \
+    elif /usr/bin/python3 scripts/keychain.py unlock "$KEYCHAIN" "$PW_FILE" \
+      && /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP" \
         > build/verify/codesign-sign.log 2>&1; then
-      if ! "$PYTHON" scripts/keychain.py lock "$KEYCHAIN"; then
+      if ! /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN"; then
         note "FAIL: dev keychain did not lock"
         fail=$((fail + 1))
       fi
-      if "$PYTHON" scripts/check-dev-bundle.py --inspect "$DEV_APP" > build/verify/codesign.txt 2>&1; then
+      if /usr/bin/python3 scripts/check-dev-bundle.py --inspect "$DEV_APP" > build/verify/codesign.txt 2>&1; then
         note "PASS: designated requirement has a certificate leaf (signed in build/, not copied to ~/Applications)"
-        note "$("$GREP" '^designated' build/verify/codesign.txt || true)"
+        note "$(/usr/bin/grep '^designated' build/verify/codesign.txt || true)"
         note "PASS: dev LSMinimumSystemVersion matches the binary and LSUIElement is true"
         sign_ok=1
       else
@@ -237,7 +231,7 @@ if "$ZSH" -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
         fail=$((fail + 1))
       fi
     else
-      "$PYTHON" scripts/keychain.py lock "$KEYCHAIN" || true
+      /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN" || true
       note "FAIL: codesign failed. See build/verify/codesign-sign.log"
       fail=$((fail + 1))
     fi
@@ -255,7 +249,7 @@ fi
 
 note ""
 note "fixture compile"
-if "$ZSH" -f build.sh --fixture > build/verify/fixture-build.log 2>&1; then
+if /bin/zsh -f build.sh --fixture > build/verify/fixture-build.log 2>&1; then
   note "PASS: fixture app compiled and signed, not launched"
 else
   note "FAIL: fixture app did not build"
@@ -268,7 +262,7 @@ fi
 note ""
 if [[ "$live" == 1 ]]; then
   live_status=0
-  SHORTCUP_SIGN_OK="$sign_ok" "$ZSH" -f "$ROOT/scripts/verify-live.sh" "$@" > build/verify/live.log 2>&1 || live_status=$?
+  SHORTCUP_SIGN_OK="$sign_ok" /bin/zsh -f "$ROOT/scripts/verify-live.sh" "$@" > build/verify/live.log 2>&1 || live_status=$?
   while IFS= read -r line; do
     note "$line"
   done < build/verify/live.log
@@ -282,26 +276,26 @@ note "LAYER 4 privacy"
 /bin/mkdir -p "${HOME}/.config/shortcup"
 if [[ ! -f "$CANARY_FILE" ]]; then
   umask 077
-  print -n -- "SCX-$("$OPENSSL" rand -hex 4)" > "$CANARY_FILE"
+  print -n -- "SCX-$(/usr/bin/openssl rand -hex 4)" > "$CANARY_FILE"
   /bin/chmod 600 "$CANARY_FILE"
 fi
-canary_mode="$("$STAT" -f '%Lp' "$CANARY_FILE")"
+canary_mode="$(/usr/bin/stat -f '%Lp' "$CANARY_FILE")"
 if [[ "$canary_mode" != "600" ]]; then
   note "CRITICAL: canary file mode is $canary_mode, expected 600"
   fail=$((fail + 1))
 fi
-pw_mode="$("$STAT" -f '%Lp' "$PW_FILE" 2>/dev/null || true)"
+pw_mode="$(/usr/bin/stat -f '%Lp' "$PW_FILE" 2>/dev/null || true)"
 if [[ "$pw_mode" != "600" ]]; then
   note "CRITICAL: keychain password file mode is ${pw_mode:-missing}, expected 600"
   fail=$((fail + 1))
 fi
-scan_file="$("$MKTEMP")"
+scan_file="$(/usr/bin/mktemp)"
 : > "$scan_file"
 scan_failed=0
 scan_blocked=0
 scan_tree() {
   local dir="$1" pattern_file="${2:-}" literal="${3:-}" out err rg_status
-  if ! "$PYTHON" scripts/canary-paths.py --allowed "$dir"; then
+  if ! /usr/bin/python3 scripts/canary-paths.py --allowed "$dir"; then
     note "FAIL: refused to scan a path outside Shortcup's own data: $(show "$dir")"
     scan_failed=1
     return 0
@@ -309,19 +303,19 @@ scan_tree() {
   [[ -e "$dir" ]] || return 0
   scanned_count=$((scanned_count + 1))
   scanned_list+=("$(show "$dir")")
-  out="$("$MKTEMP")"
-  err="$("$MKTEMP")"
+  out="$(/usr/bin/mktemp)"
+  err="$(/usr/bin/mktemp)"
   rg_status=0
   if [[ -n "$pattern_file" ]]; then
-    "$RG" -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F -f "$pattern_file" "$dir" >"$out" 2>"$err" || rg_status=$?
+    run_rg -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F -f "$pattern_file" "$dir" >"$out" 2>"$err" || rg_status=$?
   else
-    "$RG" -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F "$literal" "$dir" >"$out" 2>"$err" || rg_status=$?
+    run_rg -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F "$literal" "$dir" >"$out" 2>"$err" || rg_status=$?
   fi
   if [[ -s "$out" || "$rg_status" == 0 ]]; then
-    cat "$out" >> "$scan_file"
+    /bin/cat "$out" >> "$scan_file"
   elif [[ "$rg_status" == 1 ]]; then
     :
-  elif [[ "$rg_status" == 2 && ! -s "$out" ]] && "$PYTHON" scripts/rg-blocked.py "$err"; then
+  elif [[ "$rg_status" == 2 && ! -s "$out" ]] && /usr/bin/python3 scripts/rg-blocked.py "$err"; then
     note "canary scan: unreadable or interrupted paths under $(show "$dir"). Readable files had no match. Those paths are not a pass."
     scan_blocked=1
   else
@@ -335,11 +329,11 @@ typeset -a scanned_list
 # Random canary. The file itself lives in ~/.config and is not scanned.
 while IFS= read -r root; do
   scan_tree "$root" "$CANARY_FILE"
-done < <("$PYTHON" scripts/canary-paths.py)
+done < <(/usr/bin/python3 scripts/canary-paths.py)
 # Self-check of the guard: another app's data must be refused.
-if "$PYTHON" scripts/canary-paths.py --allowed "$HOME/Library/Containers" \
-  || "$PYTHON" scripts/canary-paths.py --allowed "$HOME/Library/Preferences" \
-  || "$PYTHON" scripts/canary-paths.py --allowed "$HOME/Library/Caches/com.example.other"; then
+if /usr/bin/python3 scripts/canary-paths.py --allowed "$HOME/Library/Containers" \
+  || /usr/bin/python3 scripts/canary-paths.py --allowed "$HOME/Library/Preferences" \
+  || /usr/bin/python3 scripts/canary-paths.py --allowed "$HOME/Library/Caches/com.example.other"; then
   note "FAIL: canary scan allow-list accepts another app's data"
   scan_failed=1
 fi

@@ -14,8 +14,7 @@ BYPASS = [
     ("/usr/bin/open -g x", "open"),
     ("x=\"$(open -g y)\"", "open"),
     ("x=`open -g y`", "open"),
-    ("cmd=\"${open}\"", "open"),
-    ("n=$((open))", "open"),
+    ("cmd=open; \"$cmd\"", "variable command"),
     ("osascript -e 'tell application \"Finder\" to activate'", "osascript"),
     ("eval \"$cmd\"", "eval"),
     ("python3 -c 'print(1)'", "python3 -c"),
@@ -25,9 +24,22 @@ BYPASS = [
     ("awk 'BEGIN { system(\"id\") }'", "awk system("),
     ("git -c alias.x='!id' x", "git -c alias"),
     ("rg --pre python3 .", "rg --pre"),
-    ("\"$app/Contents/MacOS/Fixture\" --x &", "app-binary path"),
-    ("\"$bin/Contents/MacOS/ShortcupDev\" --selftest x &", "app-binary path"),
-    ("~/Applications/Shortcup Dev.app", "app-binary path"),
+    ("\"$app/Contents/MacOS/Fixture\" --x &", "variable command"),
+    ("\"$bin/Contents/MacOS/ShortcupDev\" --selftest x &", "variable command"),
+    ("source other.sh", "source"),
+    (". ./other.sh", " . is not allowed"),
+    ("perl -e 'system(\"open\")'", "perl"),
+    ("ruby -e 'system(\"open\")'", "ruby"),
+    ("exec \"$bin\"", "exec"),
+    ("nohup open -g x", "nohup"),
+    ("xargs open", "xargs"),
+    ("/bin/zsh -c 'open -g x'", "zsh -c"),
+    ("python3 <<< 'import os; os.system(\"open x\")'", "here-string"),
+    ("python3 <<'PY'\nimport os\nos.system('open x')\nPY\n", "python3"),
+    ("cat <<'EOF' | /bin/zsh\nContents/MacOS/ShortcupDev\nEOF\n", "not allow-listed"),
+    ("env FOO=1 /usr/bin/open -g x", "env"),
+    ("command open -g x", "command"),
+    ("launchctl kickstart gui/501/x", "launchctl"),
     ("# LIVE-ONLY-START\nopen -g x\n# LIVE-ONLY-END\n", "open"),
     ("# LIVE-ONLY-START\neval \"$cmd\"\n# LIVE-ONLY-END\n", "eval"),
 ]
@@ -44,6 +56,7 @@ ACCEPTED = [
     "/usr/bin/python3 scripts/check-launch-guard.py\n",
     "/bin/zsh -f build.sh --checks-only\n",
     "if [[ \"$live\" == 1 ]]; then\n  /bin/zsh -f \"$ROOT/scripts/verify-live.sh\" \"$@\"\nfi\n",
+    "# if [[ \"$live\" == 1 ]]; then\nprint -- ok\n# fi\n",
 ]
 
 VERIFY_OK = """#!/bin/zsh
@@ -76,13 +89,30 @@ if [[ "$live" == 1 ]]; then
 fi
 """
 
+VERIFY_ELSE = """#!/bin/zsh
+live=0
+if [[ "$live" == 1 ]]; then
+  print -- "then branch"
+else
+  /bin/zsh -f "$ROOT/scripts/verify-live.sh" "$@"
+fi
+"""
+
+VERIFY_COMMENT_IF = """#!/bin/zsh
+live=0
+# if this comment contains if [[ "$live" == 1 ]]; then it must not raise depth
+if [[ "$live" == 1 ]]; then
+  /bin/zsh -f "$ROOT/scripts/verify-live.sh" "$@"
+fi
+"""
+
 
 def main():
     failures = []
     for script, expect in BYPASS:
-        found = guard.scan_file_text(script)
+        found = "\n".join(guard.scan_file_text(script))
         if expect not in found:
-            failures.append(f"expected {expect!r} for {script!r}, got {found}")
+            failures.append(f"expected {expect!r} for {script!r}, got {found!r}")
     for script in ACCEPTED:
         found = guard.scan_file_text(script)
         if found:
@@ -95,10 +125,16 @@ def main():
     missing = guard.live_script_only_in_branch(VERIFY_MISSING)
     if "live == 1 branch does not run scripts/verify-live.sh" not in missing:
         failures.append("missing live-script call was not reported: " + str(missing))
+    else_branch = guard.live_script_only_in_branch(VERIFY_ELSE)
+    if "verify.sh names the live script outside the live == 1 branch" not in else_branch:
+        failures.append("else-branch live-script was not reported: " + str(else_branch))
+    comment_if = guard.live_script_only_in_branch(VERIFY_COMMENT_IF)
+    if comment_if:
+        failures.append("comment if raised live-branch depth: " + str(comment_if))
     if failures:
         print("\n".join(failures))
         return 1
-    print(f"PASS: launch guard cases ({len(BYPASS) + len(ACCEPTED) + 3})")
+    print(f"PASS: launch guard cases ({len(BYPASS) + len(ACCEPTED) + 5})")
     return 0
 
 

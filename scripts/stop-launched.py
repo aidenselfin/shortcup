@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Record and stop the exact processes this verify run started.
 
-Identity is pid + start time + parent pid. A reused pid is left alone.
-Matching by executable path is only used by `find`, never by `stop`.
+Identity is pid + start time (seconds and microseconds from proc_pidinfo) +
+parent pid. A reused pid is left alone. Matching by executable path is only
+used by `find`, never by `stop`.
 
   spawn RECORD -- CMD...
       Start CMD, append its identity to RECORD, wait for CMD, exit with CMD.
@@ -12,18 +13,21 @@ Matching by executable path is only used by `find`, never by `stop`.
       Print pids whose executable path is exactly one of PATH.
   stop RECORD
       SIGTERM, wait, SIGKILL the recorded identities. Print remaining=N.
-      Exit 1 if any remain.
+      Exit 1 if any remain, or if RECORD is missing.
 """
 import ctypes
 import json
 import os
 import signal
+import struct
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 PATH_MAX = 4096
+PROC_PIDTBSDINFO = 3
+SZOMB = 5
 
 _lib = None
 
@@ -36,35 +40,60 @@ def libproc():
         lib.proc_listallpids.restype = ctypes.c_int
         lib.proc_pidpath.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
         lib.proc_pidpath.restype = ctypes.c_int
+        lib.proc_pidinfo.argtypes = [
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_uint64,
+            ctypes.c_void_p,
+            ctypes.c_int,
+        ]
+        lib.proc_pidinfo.restype = ctypes.c_int
         _lib = lib
     return _lib
 
 
-def identity_from_ps(pid):
+def pid_alive(pid):
     try:
-        out = subprocess.check_output(
-            ["/bin/ps", "-p", str(pid), "-o", "pid=", "-o", "ppid=", "-o", "state=", "-o", "lstart="],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        ).strip()
-    except subprocess.CalledProcessError:
-        return None
-    parts = out.split(None, 3)
-    if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
-        return None
-    return {
-        "pid": int(parts[0]),
-        "ppid": int(parts[1]),
-        "state": parts[2],
-        "start_sec": parts[3],
-        "start_usec": 0,
-    }
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
 
 
 def identity(pid):
-    # pid + lstart + ppid. lstart is unique for a pid reuse in the same second
-    # when combined with ppid. Avoids a fragile proc_bsdinfo layout.
-    return identity_from_ps(pid)
+    """pid + ppid + start_tvsec + start_tvusec from proc_pidinfo.
+
+    Returns None if proc_pidinfo fails. Callers that need to decide whether a
+    recorded pid is gone must treat that as 'still remaining' when the pid is
+    alive, not as dead.
+    """
+    pid = int(pid)
+    buf = ctypes.create_string_buffer(512)
+    n = libproc().proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, buf, 512)
+    if n < 144:
+        return None
+    status = struct.unpack_from("<I", buf, 4)[0]
+    pid_v, ppid_v = struct.unpack_from("<II", buf, 12)
+    if pid_v != pid:
+        return None
+    start_sec = start_usec = None
+    for off in (128, 120):
+        if n >= off + 16:
+            sec, usec = struct.unpack_from("<QQ", buf, off)
+            if 1_000_000_000 <= sec <= 4_100_000_000 and usec < 1_000_000:
+                start_sec, start_usec = int(sec), int(usec)
+                break
+    if start_sec is None:
+        return None
+    return {
+        "pid": pid_v,
+        "ppid": int(ppid_v),
+        "state": int(status),
+        "start_sec": start_sec,
+        "start_usec": start_usec,
+    }
 
 
 def same(live, recorded):
@@ -78,21 +107,26 @@ def same(live, recorded):
 
 def still_that_process(recorded):
     live = identity(recorded["pid"])
-    if live is None or not same(live, recorded):
+    if live is None:
+        # proc_pidinfo failed. If the pid is still running, count it remaining.
+        return pid_alive(recorded["pid"])
+    if not same(live, recorded):
         return False
-    # A SIGKILL'd child stays a zombie until its parent wait()s. ps still lists
-    # it, so treat Z as gone for stop.
-    return not str(live.get("state") or "").startswith("Z")
+    # A SIGKILL'd child stays a zombie until its parent wait()s. Treat SZOMB
+    # as gone for stop.
+    return live.get("state") != SZOMB
 
 
 def all_pids():
     lib = libproc()
     count = lib.proc_listallpids(None, 0)
     if count <= 0:
-        return []
+        raise SystemExit("proc_listallpids failed")
     buffer = (ctypes.c_int * (count + 64))()
     count = lib.proc_listallpids(buffer, ctypes.sizeof(buffer))
-    return [pid for pid in buffer[: max(count, 0)] if pid > 0]
+    if count <= 0:
+        raise SystemExit("proc_listallpids failed")
+    return [pid for pid in buffer[:count] if pid > 0]
 
 
 def exe_path(pid):
@@ -116,10 +150,10 @@ def append_record(path, ident):
 
 
 def load_record(path):
-    recorded = []
     file = Path(path)
     if not file.is_file():
-        return recorded
+        raise SystemExit("missing process record file")
+    recorded = []
     for line in file.read_text().splitlines():
         line = line.strip()
         if not line:

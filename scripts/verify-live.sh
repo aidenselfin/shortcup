@@ -5,6 +5,7 @@ set -euo pipefail
 cd "${0:A:h:h}"
 
 PYTHON=/usr/bin/python3
+TR=/usr/bin/tr
 
 live=0
 launch_method=open
@@ -36,23 +37,35 @@ ROOT="$PWD"
 fail=0
 sign_ok="${SHORTCUP_SIGN_OK:-0}"
 stop_remaining=0
+/bin/mkdir -p build/verify
+: > "$RECORD"
 
 note() { print -- "$1"; }
 
 record_pid() {
   local pid="$1"
-  [[ "$pid" == <-> ]] || return 0
-  "$PYTHON" scripts/stop-launched.py record "$RECORD" "$pid" >/dev/null || true
+  [[ "$pid" == <-> ]] || return 1
+  "$PYTHON" scripts/stop-launched.py record "$RECORD" "$pid" >/dev/null
 }
 
 stop_launched() {
   stop_remaining=0
-  [[ -f "$RECORD" ]] || return 0
-  local out
-  out="$("$PYTHON" scripts/stop-launched.py stop "$RECORD" 2>&1 || true)"
+  if [[ ! -f "$RECORD" ]]; then
+    print -- "FAIL: process record file is missing"
+    stop_remaining=1
+    return 1
+  fi
+  local out code
+  set +e
+  out="$("$PYTHON" scripts/stop-launched.py stop "$RECORD" 2>&1)"
+  code=$?
+  set -e
   print -r -- "$out"
   stop_remaining="$(print -r -- "$out" | /usr/bin/awk -F= '/^remaining=/ { print $2 }')"
   [[ "$stop_remaining" == <-> ]] || stop_remaining=1
+  if [[ "$code" != 0 && "$stop_remaining" == 0 ]]; then
+    stop_remaining=1
+  fi
   return 0
 }
 
@@ -86,7 +99,7 @@ if [[ "$launch_method" == "open" ]]; then
   src="$DEV_APP/Contents/MacOS/ShortcupDev"
   dst="$INSTALLED/Contents/MacOS/ShortcupDev"
   if [[ ! -f "$dst" ]] || ! /usr/bin/cmp -s "$src" "$dst"; then
-    already="$("$PYTHON" scripts/stop-launched.py find "$dst" || true)"
+    already="$("$PYTHON" scripts/stop-launched.py find "$dst")"
     if [[ -n "$already" ]]; then
       note "FAIL: installed Shortcup Dev is running and the binary differs. This script will not quit it."
       fail=$((fail + 1))
@@ -100,7 +113,7 @@ fi
 
 fixture_exe="$ROOT/$FIXTURE/Contents/MacOS/Fixture"
 dev_exe="$launch_app/Contents/MacOS/ShortcupDev"
-already="$("$PYTHON" scripts/stop-launched.py find "$dev_exe" "$fixture_exe" || true)"
+already="$("$PYTHON" scripts/stop-launched.py find "$dev_exe" "$fixture_exe")"
 if [[ -n "$already" ]]; then
   note "FAIL: Shortcup Dev or the fixture is already running from the paths this run would launch. Nothing was started."
   fail=$((fail + 1))
@@ -108,7 +121,6 @@ if [[ -n "$already" ]]; then
 fi
 
 /bin/mkdir -p "$CONTROL" "$STRUCT_CONTROL" "${HOME}/.config/shortcup" build/verify
-: > "$RECORD"
 canary="SCX-$(/usr/bin/openssl rand -hex 4)"
 umask 077
 print -n -- "$canary" > "$CANARY_FILE"
@@ -122,7 +134,9 @@ else
 fi
 struct_opener="$!"
 for _ in {1..75}; do
-  [[ -f "$STRUCT_CONTROL/fixture.pid" ]] && record_pid "$(tr -dc '0-9' < "$STRUCT_CONTROL/fixture.pid" || true)"
+  if [[ -f "$STRUCT_CONTROL/fixture.pid" ]]; then
+    record_pid "$("$TR" -dc '0-9' < "$STRUCT_CONTROL/fixture.pid")"
+  fi
   [[ -f "$STRUCT_OUT" ]] && break
   kill -0 "$struct_opener" 2>/dev/null || break
   /bin/sleep 0.2
@@ -158,11 +172,11 @@ lsof_connections=0
 pid=""
 for _ in {1..375}; do
   if [[ -f "$CONTROL/shortcup.pid" ]]; then
-    pid="$(tr -dc '0-9' < "$CONTROL/shortcup.pid" || true)"
+    pid="$("$TR" -dc '0-9' < "$CONTROL/shortcup.pid")"
     record_pid "$pid"
   fi
   if [[ -f "$CONTROL/fixture.pid" ]]; then
-    record_pid "$(tr -dc '0-9' < "$CONTROL/fixture.pid" || true)"
+    record_pid "$("$TR" -dc '0-9' < "$CONTROL/fixture.pid")"
   fi
   if [[ "$lsof_samples" -lt 2 && -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     if /usr/sbin/lsof -nP -a -i -p "$pid" > "build/verify/lsof-$((lsof_samples + 1)).txt" 2>/dev/null; then
