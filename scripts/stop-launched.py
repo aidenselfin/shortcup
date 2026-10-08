@@ -136,12 +136,17 @@ def is_zombie(pid, live):
 
 def still_that_process(recorded):
     live = identity(recorded["pid"])
+    state = ps_state(recorded["pid"])
     if live is None:
-        # proc_pidinfo failed. If the pid is still running, count it remaining.
-        return pid_alive(recorded["pid"])
+        if not pid_alive(recorded["pid"]):
+            return False
+        # Zombies often make proc_pidinfo fail while kill(0) still succeeds.
+        if state is not None and state[:1] == "Z":
+            return False
+        # Could not read identity or state: count as remaining, not dead.
+        return True
     if not same(live, recorded):
         return False
-    # A SIGKILL'd child stays a zombie until its parent wait()s. Treat Z as gone.
     if is_zombie(recorded["pid"], live):
         return False
     return True
