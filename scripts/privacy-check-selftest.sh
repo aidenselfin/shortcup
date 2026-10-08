@@ -146,7 +146,8 @@ printf '%s\n' "{}" > "$repo/build/validation-events-old.jsonl"
 printf '%s\n' "{}" > "$repo/build/validation-state.json.bak"
 # Exact fixture path: marked lines skip only their own rule; an unmarked line is not.
 cp "$fixtures/fake-user-path.txt" "$repo/scripts/privacy-fixtures/fake-user-path.txt"
-printf '%s\n' "/Users/unmarkeduser/unmarked" >> "$repo/scripts/privacy-fixtures/fake-user-path.txt"
+unmarked_user="unmarkeduser"
+printf '%s\n' "/Users/${unmarked_user}/unmarked" >> "$repo/scripts/privacy-fixtures/fake-user-path.txt"
 printf '%s %s %s\n' "$fake_token" "$fake_path/combined" "$marker" >> "$repo/scripts/privacy-fixtures/fake-user-path.txt"
 cp "$fixtures/fake-user-path.txt" "$repo/scripts/privacy-fixtures/nested/fake-user-path.txt"
 commit_all "$repo" "plant fake fixtures"
@@ -216,6 +217,19 @@ has scripts/privacy-fixtures/fake-user-path.txt github-pat 13
   fail exact-fixture-marked-lines-flagged-gitleaks
 has scripts/privacy-fixtures/nested/fake-user-path.txt macos-user-path 2
 lacks clean/
+
+# Dir scan must read the scanned blob, not a dirtied worktree of the same path.
+python3 - "$repo/scripts/privacy-fixtures/fake-user-path.txt" "$marker" << 'PY'
+import sys
+path, marker = sys.argv[1], sys.argv[2]
+lines = open(path).read().splitlines()
+lines[11] = lines[11] + " " + marker
+open(path, "w").write("\n".join(lines) + "\n")
+PY
+run --repo "$repo" --all --gitleaks --config "$config"
+expect 1 planted-gitleaks-dir-blob
+has scripts/privacy-fixtures/fake-user-path.txt macos-user-path 12
+git -C "$repo" checkout -q -- scripts/privacy-fixtures/fake-user-path.txt
 
 # 2. Range: added then removed, commit message, rename, non-ASCII name, a content
 #    line that looks like a diff header, and media warnings.
@@ -327,7 +341,8 @@ expect 1 png-only-gitleaks
 has icon.png unreviewed-media
 
 mkdir -p "$repo/scripts"
-printf '%s\n' "icon.png" > "$repo/scripts/privacy-binary-allowlist.txt"
+png_sha=$(git -C "$repo" rev-parse "$png_head:icon.png")
+printf '%s %s\n' "icon.png" "$png_sha" > "$repo/scripts/privacy-binary-allowlist.txt"
 summary="$tmp/png-allowed-summary"
 : > "$summary"
 set +e
@@ -337,9 +352,32 @@ set -e
 expect 0 png-allowlisted-check
 grep -F -q "::warning file=icon.png::" "$tmp/err" || fail missing-allowlisted-warning
 grep -F -q "icon.png" "$summary" || fail missing-allowlisted-summary
-printf '%s\n' "icon.*" > "$repo/scripts/privacy-binary-allowlist.txt"
+printf '%s\n' "icon.png" > "$repo/scripts/privacy-binary-allowlist.txt"
+run --repo "$repo" --range "$png_base" "$png_head"
+expect_error png-path-only-allowlist
+printf '%s %s\n' "icon.*" "$png_sha" > "$repo/scripts/privacy-binary-allowlist.txt"
 run --repo "$repo" --range "$png_base" "$png_head"
 expect_error png-wildcard-allowlist
+printf '%s %s\n' "icon.png" "$png_sha" > "$repo/scripts/privacy-binary-allowlist.txt"
+printf 'PNG\000changed-bytes\n' > "$repo/icon.png"
+git -C "$repo" add icon.png
+git -C "$repo" commit -q -m "replace icon"
+png_mod=$(git -C "$repo" rev-parse HEAD)
+run --repo "$repo" --range "$png_head" "$png_mod"
+expect 1 png-modified-stale-sha
+has icon.png unreviewed-media
+run --repo "$repo" --range "$png_head" "$png_mod" --gitleaks --config "$config"
+expect 1 png-modified-stale-sha-gitleaks
+has icon.png unreviewed-media
+git -C "$repo" rm -q icon.png
+ln -s ok.txt "$repo/icon.png"
+git -C "$repo" add icon.png
+git -C "$repo" commit -q -m "icon becomes a symlink"
+png_type=$(git -C "$repo" rev-parse HEAD)
+printf '%s %s\n' "icon.png" "$png_sha" > "$repo/scripts/privacy-binary-allowlist.txt"
+run --repo "$repo" --range "$png_mod" "$png_type"
+expect 1 png-typechange-stale-sha
+has icon.png unreviewed-media
 
 # 3. Content that exists only in a merge commit, removed afterwards.
 repo="$tmp/merge"

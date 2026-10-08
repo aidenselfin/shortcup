@@ -14,10 +14,10 @@ description = "signing, keychain, environment, or Xcode user files"
 path = '''(?i)(?:\.(?:p12|pem|key|cer|p8|pfx|mobileprovision|provisionprofile|keychain|keychain-db|certsigningrequest)$|(?:^|/)\.env(?:\..*)?$|(?:^|/)xcuserdata/|(?:^|/)\.config/shortcup/|(?:^|/)validation-(?:events|state|results)[^/]*$|(?:^|/)validation-fixtures/)'''
 
 # Home directories in any spelling: slash or backslash, JSON-escaped, any letter case,
-# and non-ASCII names. . and .. segments are part of the match so /Users/./name and
-# /Users/Shared/../name are not treated as runner/Shared. Only runner and Shared are
-# allowed after those segments. The secret group leaves out the leading slash so the
-# default config's allowlist for plain Unix paths never applies.
+# and non-ASCII names. Dot and dot-dot segments are folded before the username is
+# checked, so they cannot hide a personal home path behind Shared or runner.
+# Only runner and Shared are allowed as that username. The secret group leaves out
+# the leading slash so the default config's allowlist for plain Unix paths never applies.
 [[rules]]
 id = "macos-user-path"
 description = "home directory other than runner or Shared"
@@ -128,6 +128,13 @@ description = "PR-only: remove after squash merge"
 targetRules = ["macos-user-path"]
 commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
 paths = ['''^\.gitleaks\.toml$''']
+
+# PR-only: remove after PR #2 squash merge
+[[allowlists]]
+description = "PR-only: remove after PR #2 squash merge"
+targetRules = ["owner-device"]
+commits = ["c5e8e8b546bd72ae9211f84afb922d09c72cbc48"]
+paths = ['''^verify\.sh$''']
 
 # Public history from before this check. Pinned to commit and rule.
 [[allowlists]]

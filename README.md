@@ -48,7 +48,7 @@ open -n build/Shortcup.app --args --validate-once
 
 ## 개인정보 검사
 
-GitHub Actions의 `privacy-scan`이 모든 push(브랜치와 태그)와 PR에서 개인 경로, 키·인증서 파일, 토큰을 검사합니다. 결과에는 파일·줄·규칙만 남습니다. 새로 추가된 png/jpg/jpeg/gif/heic/pdf 등은 텍스트로 화면 내용을 검사할 수 없어 기본 거부이며, `scripts/privacy-binary-allowlist.txt`에 경로를 정확히 적은 뒤에만 통과합니다.
+GitHub Actions의 `privacy-scan`이 모든 push(브랜치와 태그)와 PR에서 개인 경로, 키·인증서 파일, 토큰을 검사합니다. 결과에는 파일·줄·규칙만 남습니다. 새로 추가된 png/jpg/jpeg/gif/heic/pdf 등은 텍스트로 화면 내용을 검사할 수 없어 기본 거부이며, `scripts/privacy-binary-allowlist.txt`에 경로와 그 파일의 blob SHA를 같이 적은 뒤에만 통과합니다.
 
 푸시 전에 같은 검사를 로컬에서 돌리려면 이 저장소에만 pre-push 훅을 설치하세요. 전역 git 설정은 바꾸지 않습니다.
 

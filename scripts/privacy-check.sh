@@ -301,7 +301,7 @@ scripts/privacy-fixtures/fake-github-token.txt"
 # entry skips that exact path in that exact commit.
 legacy_paths=""
 
-# PR-only: remove after squash merge
+# PR-only: remove after squash merge. c5e8e8b5 / verify.sh: remove after PR #2 squash merge.
 pr_only_allow="ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh private-key
 f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh private-key
 94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-user-path.txt users-path
@@ -323,7 +323,8 @@ e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh users
 e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh macos-user-path
 e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh owner-device
 e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml users-path
-e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml macos-user-path"
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml macos-user-path
+c5e8e8b546bd72ae9211f84afb922d09c72cbc48 verify.sh owner-device"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
@@ -653,11 +654,11 @@ SKIP_MAP = {
     "github-token": {"github-token", "github-pat"},
 }
 
-def read_source_line(name, lineno, commit):
+def read_source_line(scanned_file, rel, lineno, commit):
     body = b""
     if commit:
         proc = subprocess.run(
-            ["git", "-C", repo, "cat-file", "blob", f"{commit}:{name}"],
+            ["git", "-C", repo, "cat-file", "blob", f"{commit}:{rel}"],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -665,8 +666,8 @@ def read_source_line(name, lineno, commit):
         if proc.returncode == 0:
             body = proc.stdout
     if not body:
-        for candidate in (name, os.path.join(repo, name)):
-            if os.path.isfile(candidate):
+        for candidate in (scanned_file, os.path.join(strip, rel) if strip else ""):
+            if candidate and os.path.isfile(candidate):
                 with open(candidate, "rb") as handle:
                     body = handle.read()
                 break
@@ -683,7 +684,8 @@ for item in data:
     if not isinstance(item, dict):
         sys.exit(2)
     raw_n += 1
-    name = str(item.get("File") or "")
+    scanned = str(item.get("File") or "")
+    name = scanned
     if name.startswith("./"):
         name = name[2:]
     try:
@@ -699,7 +701,9 @@ for item in data:
     elif repo and rel.startswith(repo.rstrip("/") + "/"):
         rel = rel[len(repo.rstrip("/")) + 1 :]
     if rel in fixtures and marker:
-        source = read_source_line(rel, line, str(item.get("Commit") or "").strip())
+        source = read_source_line(
+            scanned, rel, line, str(item.get("Commit") or "").strip()
+        )
         if marker in source:
             skip = skip_rule(source)
             if rule in SKIP_MAP.get(skip, set()):
@@ -855,25 +859,40 @@ is_media() {
 
 media_list=""
 load_media_allowlist() {
-  local file="$repo/scripts/privacy-binary-allowlist.txt" line
+  local file="$repo/scripts/privacy-binary-allowlist.txt" line path sha
   media_list=""
   [[ -f "$file" ]] || return 0
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" == \#* ]] && continue
-    case "$line" in
+    sha=${line##* }
+    path=${line% *}
+    if [[ -z "$path" || "$path" == "$sha" ]]; then
+      echo "invalid-allowlist" >&2
+      exit 2
+    fi
+    case "$path" in
       *'*'* | *'?'* | *'['*)
         echo "invalid-allowlist" >&2
         exit 2
         ;;
     esac
-    media_list+="$line"$'\n'
+    if [[ ! "$sha" =~ ^[0-9a-fA-F]{40,64}$ ]]; then
+      echo "invalid-allowlist" >&2
+      exit 2
+    fi
+    media_list+="$path $sha"$'\n'
   done < "$file"
 }
 
+media_blob() {
+  git rev-parse --verify -q "${1}:${2}" 2> /dev/null || true
+}
+
 media_allowed() {
-  local f=$1
+  local f=$1 sha=$2
+  [[ -n "$f" && -n "$sha" ]] || return 1
   case $'\n'"$media_list" in
-    *$'\n'"$f"$'\n'*) return 0 ;;
+    *$'\n'"$f $sha"$'\n'*) return 0 ;;
   esac
   return 1
 }
@@ -896,21 +915,18 @@ warn_media() {
 }
 
 scan_added_media() {
-  local commit file seen=$'\n'
+  local commit file blob
   load_media_allowlist
   if [[ "$history" -eq 1 ]]; then
     git rev-list "${rev_args[@]}" > "$work/media-commits"
     while IFS= read -r commit; do
       [[ -n "$commit" ]] || continue
-      git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added-media"
+      git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=AMT --name-only "$commit" > "$work/added-media"
       while IFS= read -r -d '' file; do
         [[ -n "$file" ]] || continue
         is_media "$file" || continue
-        case "$seen" in
-          *$'\n'"$file"$'\n'*) continue ;;
-        esac
-        seen+="$file"$'\n'
-        if media_allowed "$file"; then
+        blob=$(media_blob "$commit" "$file")
+        if media_allowed "$file" "$blob"; then
           warn_media "$file"
         else
           printf '%s\n' "$file:1 unreviewed-media" >> "$found_file"
@@ -921,7 +937,8 @@ scan_added_media() {
     while IFS= read -r -d '' file; do
       [[ -n "$file" ]] || continue
       is_media "$file" || continue
-      if media_allowed "$file"; then
+      blob=$(media_blob "$scan_rev" "$file")
+      if media_allowed "$file" "$blob"; then
         warn_media "$file"
       else
         printf '%s\n' "$file:1 unreviewed-media" >> "$found_file"
