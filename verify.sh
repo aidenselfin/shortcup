@@ -218,6 +218,9 @@ fi
 note ""
 note "LAYER 1 signing"
 if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -- /bin/zsh -f setup-dev-signing.sh; then
+  if [[ -s build/verify/signing-setup.log ]]; then
+    /usr/bin/grep -E 'partition-ids=|partition-list=|pty |identity=' build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
+  fi
   if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/dev-build.log -- /bin/zsh -f build.sh --dev; then
     if /usr/bin/python3 scripts/check-dev-bundle.py --running "$DEV_APP"; then
       note "FAIL: Shortcup Dev build is already running. This script will not quit it or sign over it."
@@ -227,7 +230,7 @@ if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -
         if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
           /usr/bin/security default-keychain -s "$KEYCHAIN" || true
         fi
-        /usr/bin/python3 scripts/run-deadline.py 120 build/verify/codesign-sign.log -- /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP"
+        /usr/bin/python3 scripts/run-deadline.py 120 build/verify/codesign-sign.log -- /usr/bin/codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev --timestamp=none "$DEV_APP"
       }; then
       if ! /usr/bin/python3 scripts/run-deadline.py 120 build/verify/keychain-lock.log -- /usr/bin/python3 scripts/keychain.py lock "$KEYCHAIN"; then
         note "FAIL: dev keychain did not lock"
@@ -248,6 +251,9 @@ if /usr/bin/python3 scripts/run-deadline.py 120 build/verify/signing-setup.log -
       note "FAIL: codesign failed. See build/verify/codesign-sign.log"
       if [[ -s build/verify/codesign-sign.log ]]; then
         /usr/bin/tail -n 40 build/verify/codesign-sign.log | while IFS= read -r line; do note "  $line"; done
+      fi
+      if [[ -s build/verify/signing-setup.log ]]; then
+        /usr/bin/grep -E 'partition-ids=|partition-list=|pty ' build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
       fi
       fail=$((fail + 1))
     fi

@@ -132,8 +132,13 @@ EOF
     /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN" || true
     exit 1
   fi
-  parts="$(/usr/bin/security dump-keychain "$KEYCHAIN" 2>/dev/null | /usr/bin/grep -c partitionID || true)"
+  parts="$(/usr/bin/security dump-keychain "$KEYCHAIN" 2>/dev/null | /usr/bin/grep -ci partition || true)"
   print -- "partition-ids=${parts:-0}"
+  if [[ "${parts:-0}" == "0" ]]; then
+    print -- "ERROR: keychain partition list is empty" >&2
+    /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN" || true
+    exit 1
+  fi
   /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN"
   /bin/rm -rf "$work"
   trap - EXIT
