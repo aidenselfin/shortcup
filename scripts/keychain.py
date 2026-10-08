@@ -6,8 +6,12 @@ set-partition-list uses the Security API so the keychain password is not placed
 on argv and getpass() is never called on /dev/tty.
 """
 import ctypes
+import os
+import pty
+import select
 import stat
 import sys
+import time
 from pathlib import Path
 
 Security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
@@ -33,8 +37,6 @@ Security.SecKeychainItemCopyAccess.argtypes = [ctypes.c_void_p, ctypes.POINTER(c
 Security.SecKeychainItemCopyAccess.restype = ctypes.c_int32
 Security.SecAccessCopyACLList.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
 Security.SecAccessCopyACLList.restype = ctypes.c_int32
-Security.SecACLSetPartitionIDs.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-Security.SecACLSetPartitionIDs.restype = ctypes.c_int32
 Security.SecKeychainItemSetAccessWithPassword.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p
 ]
@@ -61,6 +63,10 @@ CoreFoundation.CFDictionaryCreateMutable.argtypes = [
 CoreFoundation.CFDictionaryCreateMutable.restype = ctypes.c_void_p
 CoreFoundation.CFDictionarySetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 CoreFoundation.CFDictionarySetValue.restype = None
+CoreFoundation.CFGetTypeID.argtypes = [ctypes.c_void_p]
+CoreFoundation.CFGetTypeID.restype = ctypes.c_ulong
+CoreFoundation.CFArrayGetTypeID.argtypes = []
+CoreFoundation.CFArrayGetTypeID.restype = ctypes.c_ulong
 
 kCFStringEncodingUTF8 = 0x08000100
 errSecItemNotFound = -25300
@@ -190,6 +196,8 @@ def copy_identities(keychain):
         return [], None
     if status != 0:
         fail("could not find a signing identity in the dedicated dev keychain", status)
+    if CoreFoundation.CFGetTypeID(result) != CoreFoundation.CFArrayGetTypeID():
+        return [result], result
     items = []
     count = CoreFoundation.CFArrayGetCount(result)
     for index in range(count):
@@ -197,7 +205,16 @@ def copy_identities(keychain):
     return items, result
 
 
-def apply_partitions(item, partitions, password):
+def acl_set_partition_ids():
+    func = getattr(Security, "SecACLSetPartitionIDs", None)
+    if func is None:
+        return None
+    func.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    func.restype = ctypes.c_int32
+    return func
+
+
+def apply_partitions(item, partitions, password, set_ids):
     access = ctypes.c_void_p()
     status = Security.SecKeychainItemCopyAccess(item, ctypes.byref(access))
     if status != 0:
@@ -211,7 +228,7 @@ def apply_partitions(item, partitions, password):
     applied = 0
     for index in range(count):
         acl = CoreFoundation.CFArrayGetValueAtIndex(acl_list, index)
-        status = Security.SecACLSetPartitionIDs(acl, partitions)
+        status = set_ids(acl, partitions)
         if status == 0:
             applied += 1
     CoreFoundation.CFRelease(acl_list)
@@ -227,8 +244,10 @@ def apply_partitions(item, partitions, password):
         fail("could not set key access for the dedicated dev keychain", status)
 
 
-def set_partition_list(keychain_path, password_file):
-    password = password_bytes(password_file)
+def set_partition_list_api(keychain_path, password):
+    set_ids = acl_set_partition_ids()
+    if set_ids is None:
+        raise RuntimeError("SecACLSetPartitionIDs is unavailable")
     ref = open_keychain(keychain_path)
     buffer = ctypes.create_string_buffer(password)
     status = Security.SecKeychainUnlock(ref, len(password), ctypes.cast(buffer, ctypes.c_void_p), 1)
@@ -246,7 +265,7 @@ def set_partition_list(keychain_path, password_file):
             if status != 0:
                 fail("could not copy the identity private key", status)
             try:
-                apply_partitions(key, partitions, password)
+                apply_partitions(key, partitions, password, set_ids)
             finally:
                 CoreFoundation.CFRelease(key)
     finally:
@@ -256,6 +275,72 @@ def set_partition_list(keychain_path, password_file):
         if array_ref:
             CoreFoundation.CFRelease(array_ref)
         CoreFoundation.CFRelease(ref)
+
+
+def set_partition_list_security(keychain_path, password):
+    """Drive /usr/bin/security without putting the password on argv.
+
+    security set-key-partition-list without -k calls getpass() on its
+    controlling tty. A private pty is that tty, so this does not hang and
+    does not prompt on the caller's terminal.
+    """
+    argv = [
+        "/usr/bin/security",
+        "set-key-partition-list",
+        "-S",
+        "apple-tool:,apple:,codesign:",
+        "-s",
+        keychain_path,
+    ]
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv(argv[0], argv)
+        os._exit(127)
+    sent = False
+    deadline = time.monotonic() + 20
+    try:
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([fd], [], [], 0.2)
+            if ready:
+                try:
+                    chunk = os.read(fd, 1024)
+                except OSError:
+                    chunk = b""
+                if not chunk:
+                    break
+                if not sent:
+                    os.write(fd, password + b"\n")
+                    sent = True
+            waited, status = os.waitpid(pid, os.WNOHANG)
+            if waited == pid:
+                if os.WIFEXITED(status) and os.WEXITSTATUS(status) == 0:
+                    return
+                code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else 1
+                fail("security set-key-partition-list failed", code)
+        fail("security set-key-partition-list did not finish")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.kill(pid, 9)
+            os.waitpid(pid, 0)
+        except OSError:
+            pass
+
+
+def set_partition_list(keychain_path, password_file):
+    password = password_bytes(password_file)
+    try:
+        set_partition_list_api(keychain_path, password)
+        print("partition-list=ok")
+        return
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        print("ERROR: Security API partition list failed: " + str(exc), file=sys.stderr)
+    set_partition_list_security(keychain_path, password)
     print("partition-list=ok")
 
 

@@ -43,16 +43,22 @@ def libproc():
 def identity_from_ps(pid):
     try:
         out = subprocess.check_output(
-            ["/bin/ps", "-p", str(pid), "-o", "pid=", "-o", "ppid=", "-o", "lstart="],
+            ["/bin/ps", "-p", str(pid), "-o", "pid=", "-o", "ppid=", "-o", "state=", "-o", "lstart="],
             text=True,
             stderr=subprocess.DEVNULL,
         ).strip()
     except subprocess.CalledProcessError:
         return None
-    parts = out.split(None, 2)
-    if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+    parts = out.split(None, 3)
+    if len(parts) < 4 or not parts[0].isdigit() or not parts[1].isdigit():
         return None
-    return {"pid": int(parts[0]), "ppid": int(parts[1]), "start_sec": parts[2], "start_usec": 0}
+    return {
+        "pid": int(parts[0]),
+        "ppid": int(parts[1]),
+        "state": parts[2],
+        "start_sec": parts[3],
+        "start_usec": 0,
+    }
 
 
 def identity(pid):
@@ -72,7 +78,11 @@ def same(live, recorded):
 
 def still_that_process(recorded):
     live = identity(recorded["pid"])
-    return live is not None and same(live, recorded)
+    if live is None or not same(live, recorded):
+        return False
+    # A SIGKILL'd child stays a zombie until its parent wait()s. ps still lists
+    # it, so treat Z as gone for stop.
+    return not str(live.get("state") or "").startswith("Z")
 
 
 def all_pids():

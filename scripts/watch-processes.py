@@ -131,7 +131,7 @@ def self_check(lib, ignore_pids):
         if not seen:
             print("FAIL: process watcher did not see a dummy executable under build/", file=sys.stderr)
             return False
-        print("PASS: process watcher detected a dummy executable under build/")
+        print("PASS: process watcher detected a dummy executable under build/", flush=True)
         return True
     finally:
         if proc.poll() is None:

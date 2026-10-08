@@ -97,8 +97,11 @@ basicConstraints=critical,CA:false
 keyUsage=critical,digitalSignature
 extendedKeyUsage=critical,codeSigning
 EOF
-  "$OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$work/cs.cnf" -extensions ext \
-    -keyout "$work/key.pem" -out "$work/cert.pem" >/dev/null 2>&1
+  if ! "$OPENSSL" req -x509 -newkey rsa:2048 -nodes -days 3650 -config "$work/cs.cnf" -extensions ext \
+    -keyout "$work/key.pem" -out "$work/cert.pem" >/dev/null; then
+    print -- "ERROR: could not create the dedicated signing certificate" >&2
+    exit 1
+  fi
   chmod 600 "$work/key.pem" "$work/cert.pem"
   cp "$work/key.pem" "${CONF_DIR}/dev-key.pem"
   cp "$work/cert.pem" "${CONF_DIR}/dev-cert.pem"
@@ -115,8 +118,14 @@ EOF
   # does. Its wrapping password is a temp file, not the keychain password.
   umask 077
   print -n -- "import-once" > "$work/p12pass"
-  "$OPENSSL" pkcs12 -export -legacy -inkey "$work/key.pem" -in "$work/cert.pem" -out "$work/dev.p12" -passout "file:$work/p12pass" >/dev/null
-  "$SECURITY" import "$work/dev.p12" -k "$KEYCHAIN" -P import-once -T /usr/bin/codesign >/dev/null
+  if ! "$OPENSSL" pkcs12 -export -legacy -inkey "$work/key.pem" -in "$work/cert.pem" -out "$work/dev.p12" -passout "file:$work/p12pass" >/dev/null; then
+    print -- "ERROR: could not wrap the dedicated signing identity" >&2
+    exit 1
+  fi
+  if ! "$SECURITY" import "$work/dev.p12" -k "$KEYCHAIN" -P import-once -T /usr/bin/codesign; then
+    print -- "ERROR: could not import the dedicated signing identity" >&2
+    exit 1
+  fi
   if ! "$PYTHON" "$PWD/scripts/keychain.py" set-partition-list "$KEYCHAIN" "$PW_FILE"; then
     print -- "ERROR: could not set the dedicated keychain partition list" >&2
     "$PYTHON" "$PWD/scripts/keychain.py" lock "$KEYCHAIN" || true

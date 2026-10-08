@@ -247,6 +247,9 @@ if "$ZSH" -f setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
   fi
 else
   note "FAIL: signing identity was not created"
+  if [[ -s build/verify/signing-setup.log ]]; then
+    /usr/bin/tail -n 80 build/verify/signing-setup.log | while IFS= read -r line; do note "  $line"; done
+  fi
   fail=$((fail + 1))
 fi
 
