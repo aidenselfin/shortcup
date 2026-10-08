@@ -84,7 +84,11 @@ paths = ['''^scripts/privacy-fixtures/(?:fake-private-key\.txt|fake-user-path\.t
 [[allowlists]]
 description = "self-test source in one commit of this check"
 condition = "AND"
-commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
+commits = [
+  "e02dcd713c1e20ce619e5961da4a585dd918d36b",
+  "ac3d859d4547d96dc01d43f6819144be7fce7496",
+  "f09b7d309a9461e0d6a0c2220be817199f96a258",
+]
 paths = ['''^(?:scripts/privacy-check-selftest\.sh|\.gitleaks\.toml)$''']
 
 # Public history from before this check. Pinned to commit and rule.

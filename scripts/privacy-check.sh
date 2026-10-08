@@ -252,7 +252,9 @@ scripts/privacy-fixtures/fake-github-token.txt"
 legacy_paths="94d496732e60e1551155b01aea4ec3ca5b2b2d04 fixture
 2542ec18fff050c167074836f8120369f5cd28d0 fixture
 e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh
-e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml"
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml
+ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh
+f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
@@ -541,9 +543,13 @@ run_gitleaks() {
     git rev-list "${rev_args[@]}" > "$work/commits"
     while IFS= read -r commit; do
       [[ -n "$commit" ]] || continue
+      skip=$(legacy_skips "$commit")
       git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
       while IFS= read -r -d '' file; do
         [[ -n "$file" ]] || continue
+        case $'\n'"$skip"$'\n' in
+          *$'\n'"$file"$'\n'*) continue ;;
+        esac
         [[ "$(git cat-file -t "${commit}:${file}" 2> /dev/null)" == blob ]] || continue
         mkdir -p "$decoded/${commit}/$(dirname "$file")"
         decode_blob "$commit" "$file" "$decoded/${commit}/${file}"
