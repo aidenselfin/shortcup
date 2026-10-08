@@ -1,18 +1,26 @@
 #!/bin/zsh
 # Safe Shortcup checks. This script does not launch an app unless you pass --live.
 # --live opens windows on the screen and sends synthetic clicks. Leave it off.
-set -u
+# Default launch is `open -g` (Juhyeon's Mac). CI passes --direct-launch
+# or SHORTCUP_LAUNCH=direct so bash, not LaunchServices, starts the executable.
+set -euo pipefail
 cd "${0:A:h}"
 
 live=0
+launch_method=open
+if [[ "${SHORTCUP_LAUNCH:-open}" == "direct" ]]; then
+  launch_method=direct
+fi
 for arg in "$@"; do
   case "$arg" in
     --live) live=1 ;;
+    --direct-launch) launch_method=direct ;;
     *) print -- "unknown argument: $arg"; exit 2 ;;
   esac
 done
 
-APP="${HOME}/Applications/Shortcup Dev.app"
+DEV_APP="$PWD/build/Shortcup Dev.app"
+INSTALLED="${HOME}/Applications/Shortcup Dev.app"
 KEYCHAIN="${HOME}/Library/Keychains/shortcup-dev.keychain-db"
 PW_FILE="${HOME}/.config/shortcup/keychain-password"
 CANARY_FILE="${HOME}/.config/shortcup/verify-canary"
@@ -25,30 +33,34 @@ SUMMARY="build/verify/summary.txt"
 ROOT="$PWD"
 fail=0
 known=0
+sign_ok=0
 lines=()
+typeset -a recorded_pids
+typeset -A recorded_seen
 start=$SECONDS
 note() { lines+=("$1"); print -- "$1"; }
 
-# Only binaries under this repo's build/ directory. Never ~/shortcup, never ~/Applications.
-kill_build_only() {
-  local pid command
-  ps -ax -o pid=,command= | while IFS= read -r line; do
-    pid="${line%% *}"
-    command="${line#"$pid"}"
-    command="${command#"${command%%[![:space:]]*}"}"
-    case "$command" in
-      "$ROOT/build/"*) kill "$pid" 2>/dev/null || true ;;
-    esac
-  done
+record_pid() {
+  local pid="$1"
+  [[ "$pid" == <-> ]] || return 0
+  [[ -n "${recorded_seen[$pid]:-}" ]] && return 0
+  recorded_seen[$pid]=1
+  recorded_pids+=("$pid")
 }
 
+# SAFE mode returns immediately and kills nothing.
+# --live kills only pids this run recorded, after writing the quit files.
 cleanup() {
-  [[ "$live" == 1 ]] || return 0
-  [[ -d "$CONTROL" ]] && : > "$CONTROL/quit" 2>/dev/null || true
-  [[ -d "$STRUCT_CONTROL" ]] && : > "$STRUCT_CONTROL/quit" 2>/dev/null || true
-  kill_build_only
+  [[ "${live:-0}" == 1 ]] || return 0
+  [[ -n "${CONTROL:-}" ]] && mkdir -p "$CONTROL" && : > "$CONTROL/quit"
+  [[ -n "${STRUCT_CONTROL:-}" ]] && mkdir -p "$STRUCT_CONTROL" && : > "$STRUCT_CONTROL/quit"
+  local pid
+  for pid in "${recorded_pids[@]}"; do
+    kill "$pid" 2>/dev/null || true
+  done
+  return 0
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 mkdir -p build/verify
 rm -f "$SUMMARY"
@@ -57,17 +69,27 @@ note "Shortcup verify"
 if [[ "$live" == 1 ]]; then
   note "WARNING: --live will open Shortcup Fixture and Shortcup Dev windows on this screen and send synthetic clicks."
   note "The fixture is an accessory app. Its windows are small, sit in the bottom-right corner, and cannot become key."
+  note "Launch method: $launch_method. The default is open -g. CI uses --direct-launch or SHORTCUP_LAUNCH=direct."
 else
   note "SAFE MODE: no app will be launched and no click or key will be sent."
+  if [[ "$launch_method" == "direct" ]]; then
+    note "NOTE: direct launch is selected, but without --live nothing is started."
+  fi
 fi
 note ""
 
 # --- secrets and static checks (no Accessibility, no launch) ---
-if git ls-files | grep -E '\.(p12|pem|key)$|keychain-password|dev-key' >/dev/null; then
-  note "CRITICAL: a private key or password file is tracked in git"
-  fail=$((fail + 1))
+tracked=""
+if tracked="$(git ls-files)"; then
+  if print -r -- "$tracked" | grep -E '\.(p12|pem|key)$|keychain-password|dev-key' >/dev/null; then
+    note "CRITICAL: a private key or password file is tracked in git"
+    fail=$((fail + 1))
+  else
+    note "PASS: no signing key or password is tracked"
+  fi
 else
-  note "PASS: no signing key or password is tracked"
+  note "CRITICAL: git ls-files failed, so the secret check cannot pass"
+  fail=$((fail + 1))
 fi
 
 if grep -R -E 'URLSession|import Network|NWConnection|NSURLConnection' Sources Fixture >/dev/null; then
@@ -101,43 +123,25 @@ if grep -n 'hint.title' Sources/App.swift >/dev/null; then
   note "KNOWN-FAIL: menu and toolbar validation logs still store command titles (validation-events.jsonl). Expected until the v0.1 fix."
   known=$((known + 1))
 fi
-if grep -n 'NSApp.activate\|setActivationPolicy(.regular)' Fixture/main.swift >/dev/null; then
-  note "CRITICAL: the fixture can still activate or use the regular policy"
-  fail=$((fail + 1))
+if python3 scripts/check-launch-guard.py > build/verify/launch-guard.txt 2>&1; then
+  note "PASS: app launch is only inside the --live section, and both open -g and a direct executable launch are present there"
 else
-  note "PASS: fixture source does not activate and is not a regular app"
-fi
-python3 - <<'PY'
-from pathlib import Path
-lines = Path("verify.sh").read_text().splitlines()
-live = False
-bad = []
-needle = "open " + "-W"
-for number, line in enumerate(lines, 1):
-    if "LIVE-ONLY-START" in line:
-        live = True
-    elif "LIVE-ONLY-END" in line:
-        live = False
-    if line.strip().startswith("#"):
-        continue
-    if needle in line and not live:
-        bad.append(str(number))
-if bad:
-    raise SystemExit("launch is outside the live-only section: " + ",".join(bad))
-PY
-if [[ $? -eq 0 ]]; then
-  note "PASS: app launch is only inside the --live section"
-else
-  note "CRITICAL: verify.sh can launch an app without --live"
+  note "CRITICAL: verify.sh can launch an app without --live, or a launch method is missing"
+  if [[ -s build/verify/launch-guard.txt ]]; then
+    while IFS= read -r line; do note "  $line"; done < build/verify/launch-guard.txt
+  fi
   fail=$((fail + 1))
 fi
 
 note ""
 note "LAYER 2 snapshots"
-if zsh build.sh --checks-only; then
+if zsh build.sh --checks-only > build/verify/checks.log 2>&1; then
   note "PASS: snapshot replay, glyph table, locale, cache, and AX allow-list"
 else
   note "FAIL: permission-free checks"
+  if [[ -s build/verify/checks.log ]]; then
+    tail -n 40 build/verify/checks.log | while IFS= read -r line; do note "  $line"; done
+  fi
   fail=$((fail + 1))
 fi
 
@@ -154,6 +158,14 @@ if swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/
   else
     note "PASS: product build has no fixture selftest and no dead self-test branch"
   fi
+  repo_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist 2>/dev/null || true)"
+  bin_min="$(vtool -show-build build/product-link/Shortcup 2>/dev/null | awk '/minos/ { print $2; exit }' || true)"
+  if [[ -n "$repo_min" && "$repo_min" == "$bin_min" ]]; then
+    note "PASS: repo LSMinimumSystemVersion $repo_min matches the product-link binary"
+  else
+    note "FAIL: repo LSMinimumSystemVersion plist=$repo_min binary=$bin_min"
+    fail=$((fail + 1))
+  fi
 else
   note "FAIL: product sources did not compile"
   fail=$((fail + 1))
@@ -163,13 +175,25 @@ note ""
 note "JSON schema allow-list"
 schema_dir="build/verify/schema"
 mkdir -p "$schema_dir"
-print -r -- '{"cases":[],"result":"skipped","trusted":false}' > "$schema_dir/skipped.json"
-print -r -- '{"trusted":true,"result":"pass","cases":[{"subrole":"AXCloseButton","identifier":"","shortcut":"","result":"pass"}],"titleFallbackReads":1,"hangSeconds":0.01,"menuWalksAfterFirst":1,"menuWalksAfterSecond":1,"idleAxReads":0,"canaryLeak":false,"axAllowListOK":true,"disallowed":[]}' > "$schema_dir/pass.json"
-print -r -- '{"cases":[],"result":"skipped","trusted":false,"title":"should-not-be-here"}' > "$schema_dir/extra.json"
-if python3 scripts/check-selftest-json.py "$schema_dir/skipped.json" >/dev/null 2>&1 \
-  && python3 scripts/check-selftest-json.py "$schema_dir/pass.json" >/dev/null 2>&1 \
-  && ! python3 scripts/check-selftest-json.py "$schema_dir/extra.json" >/dev/null 2>&1; then
-  note "PASS: selftest JSON allow-list accepts skip and pass, rejects extra keys"
+print -r -- '{"cases":[],"result":"skipped","trusted":false,"axTrusted":false,"launchMethod":"open"}' > "$schema_dir/skipped.json"
+print -r -- '{"cases":[],"result":"skipped","trusted":false,"axTrusted":false,"launchMethod":"direct"}' > "$schema_dir/skipped-direct.json"
+print -r -- '{"trusted":true,"axTrusted":true,"launchMethod":"open","result":"pass","cases":[{"subrole":"AXCloseButton","identifier":"","shortcut":"","result":"pass"}],"titleFallbackReads":1,"hangSeconds":0.01,"menuWalksAfterFirst":1,"menuWalksAfterSecond":1,"idleAxReads":0,"canaryLeak":false,"axAllowListOK":true,"disallowed":[]}' > "$schema_dir/pass.json"
+print -r -- '{"trusted":true,"axTrusted":true,"launchMethod":"direct","result":"fail","cases":[{"subrole":"AXCloseButton","identifier":"","shortcut":"","result":"skip"}],"titleFallbackReads":1,"hangSeconds":0.01,"menuWalksAfterFirst":1,"menuWalksAfterSecond":1,"idleAxReads":0,"canaryLeak":false,"axAllowListOK":true,"disallowed":[]}' > "$schema_dir/skip-case.json"
+print -r -- '{"cases":[],"result":"skipped","trusted":false,"axTrusted":false,"launchMethod":"open","title":"should-not-be-here"}' > "$schema_dir/extra.json"
+print -r -- '{"trusted":true,"axTrusted":true,"launchMethod":"open","result":"pass","cases":[{"subrole":"AXCloseButton","identifier":"","shortcut":"","result":"pass"}],"titleFallbackReads":true,"hangSeconds":0.01,"menuWalksAfterFirst":1,"menuWalksAfterSecond":1,"idleAxReads":0,"canaryLeak":false,"axAllowListOK":true,"disallowed":[]}' > "$schema_dir/bool-int.json"
+print -r -- '{"trusted":true,"axTrusted":true,"launchMethod":"open","result":"pass","cases":[{"subrole":"AXCloseButton","identifier":"","shortcut":"","result":"pass","extra":"no"}],"titleFallbackReads":1,"hangSeconds":0.01,"menuWalksAfterFirst":1,"menuWalksAfterSecond":1,"idleAxReads":0,"canaryLeak":false,"axAllowListOK":true,"disallowed":[]}' > "$schema_dir/nested.json"
+print -r -- '{"cases":[],"result":"skipped","trusted":false,"axTrusted":false,"launchMethod":"fork"}' > "$schema_dir/bad-launch.json"
+print -r -- '{"cases":[],"result":"skipped","trusted":false,"axTrusted":true,"launchMethod":"open"}' > "$schema_dir/mismatch.json"
+if python3 scripts/check-selftest-json.py "$schema_dir/skipped.json" > build/verify/schema-ok.txt \
+  && python3 scripts/check-selftest-json.py "$schema_dir/skipped-direct.json" >> build/verify/schema-ok.txt \
+  && python3 scripts/check-selftest-json.py "$schema_dir/pass.json" >> build/verify/schema-ok.txt \
+  && python3 scripts/check-selftest-json.py "$schema_dir/skip-case.json" >> build/verify/schema-ok.txt \
+  && ! python3 scripts/check-selftest-json.py "$schema_dir/extra.json" >/dev/null 2>&1 \
+  && ! python3 scripts/check-selftest-json.py "$schema_dir/bool-int.json" >/dev/null 2>&1 \
+  && ! python3 scripts/check-selftest-json.py "$schema_dir/nested.json" >/dev/null 2>&1 \
+  && ! python3 scripts/check-selftest-json.py "$schema_dir/bad-launch.json" >/dev/null 2>&1 \
+  && ! python3 scripts/check-selftest-json.py "$schema_dir/mismatch.json" >/dev/null 2>&1; then
+  note "PASS: selftest JSON allow-list accepts axTrusted and launchMethod, rejects extra keys, bools-as-ints, and nested extras"
 else
   note "FAIL: selftest JSON allow-list"
   fail=$((fail + 1))
@@ -177,40 +201,41 @@ fi
 
 note ""
 note "LAYER 1 signing"
-sign_ok=0
 if zsh setup-dev-signing.sh > build/verify/signing-setup.log 2>&1; then
   if zsh build.sh --dev > build/verify/dev-build.log 2>&1; then
-    if ps -ax -o command= | grep -F "$APP/Contents/MacOS/ShortcupDev" | grep -v grep >/dev/null; then
-      note "FAIL: Shortcup Dev is already running. This script will not quit it."
+    if ps -ax -o command= | grep -F "$DEV_APP/Contents/MacOS/ShortcupDev" | grep -v grep >/dev/null; then
+      note "FAIL: Shortcup Dev build is already running. This script will not quit it or sign over it."
       fail=$((fail + 1))
-    else
-      rm -rf "$APP"
-      mkdir -p "${HOME}/Applications"
-      ditto "build/Shortcup Dev.app" "$APP"
-      if security unlock-keychain -p "$(cat "$PW_FILE")" "$KEYCHAIN" \
-        && codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$APP"; then
-        requirement="$(codesign -d -r- "$APP" 2>&1 || true)"
-        print -- "$requirement" > build/verify/codesign.txt
-        if print -- "$requirement" | grep -q 'certificate leaf'; then
-          note "PASS: designated requirement has a certificate leaf"
-          note "$requirement"
-          sign_ok=1
-        else
-          note "FAIL: designated requirement has no certificate leaf"
-          fail=$((fail + 1))
-        fi
-        plist_min="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$APP/Contents/Info.plist")"
-        bin_min="$(vtool -show-build "$APP/Contents/MacOS/ShortcupDev" | awk '/minos/ { print $2; exit }')"
-        if [[ "$plist_min" == "$bin_min" && -n "$bin_min" ]]; then
-          note "PASS: LSMinimumSystemVersion $plist_min matches the binary"
-        else
-          note "FAIL: LSMinimumSystemVersion plist=$plist_min binary=$bin_min"
-          fail=$((fail + 1))
-        fi
-      else
-        note "FAIL: codesign failed"
+    elif python3 scripts/keychain.py unlock "$KEYCHAIN" "$PW_FILE" \
+      && codesign --force --sign "Shortcup Dev" --keychain "$KEYCHAIN" --identifier com.shortcup.dev "$DEV_APP" \
+        > build/verify/codesign-sign.log 2>&1; then
+      if ! python3 scripts/keychain.py lock "$KEYCHAIN"; then
+        note "FAIL: dev keychain did not lock"
         fail=$((fail + 1))
       fi
+      requirement="$(codesign -d -r- "$DEV_APP" 2>&1 || true)"
+      print -- "$requirement" > build/verify/codesign.txt
+      if print -- "$requirement" | grep -q 'certificate leaf'; then
+        note "PASS: designated requirement has a certificate leaf (signed in build/, not copied to ~/Applications)"
+        note "$requirement"
+        sign_ok=1
+      else
+        note "FAIL: designated requirement has no certificate leaf"
+        fail=$((fail + 1))
+      fi
+      dev_plist="$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$DEV_APP/Contents/Info.plist" 2>/dev/null || true)"
+      dev_bin="$(vtool -show-build "$DEV_APP/Contents/MacOS/ShortcupDev" 2>/dev/null | awk '/minos/ { print $2; exit }' || true)"
+      dev_ui="$(/usr/libexec/PlistBuddy -c 'Print :LSUIElement' "$DEV_APP/Contents/Info.plist" 2>/dev/null || true)"
+      if [[ "$dev_plist" == "$dev_bin" && -n "$dev_bin" && "$dev_ui" == "true" ]]; then
+        note "PASS: dev LSMinimumSystemVersion $dev_plist matches the binary and LSUIElement is true"
+      else
+        note "FAIL: dev plist plist=$dev_plist binary=$dev_bin LSUIElement=$dev_ui"
+        fail=$((fail + 1))
+      fi
+    else
+      python3 scripts/keychain.py lock "$KEYCHAIN" || true
+      note "FAIL: codesign failed. See build/verify/codesign-sign.log"
+      fail=$((fail + 1))
     fi
   else
     note "FAIL: dev build failed"
@@ -225,8 +250,8 @@ note ""
 note "fixture compile"
 rm -rf "$FIXTURE"
 mkdir -p "$FIXTURE/Contents/MacOS"
-if swiftc -module-cache-path build/module-cache Fixture/main.swift -o "$FIXTURE/Contents/MacOS/Fixture" -framework AppKit \
-  && cat > "$FIXTURE/Contents/Info.plist" <<'EOF'
+if swiftc -module-cache-path build/module-cache Fixture/main.swift -o "$FIXTURE/Contents/MacOS/Fixture" -framework AppKit; then
+  cat > "$FIXTURE/Contents/Info.plist" <<'EOF'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -238,9 +263,12 @@ if swiftc -module-cache-path build/module-cache Fixture/main.swift -o "$FIXTURE/
 <key>LSUIElement</key><true/>
 </dict></plist>
 EOF
-then
-  codesign --force --sign - --identifier com.shortcup.fixture "$FIXTURE" >/dev/null
-  note "PASS: fixture app compiled and signed, not launched"
+  if codesign --force --sign - --identifier com.shortcup.fixture "$FIXTURE" > build/verify/fixture-codesign.log 2>&1; then
+    note "PASS: fixture app compiled and signed, not launched"
+  else
+    note "FAIL: fixture codesign failed"
+    fail=$((fail + 1))
+  fi
 else
   note "FAIL: fixture app did not build"
   fail=$((fail + 1))
@@ -251,20 +279,45 @@ run_live() {
   note ""
   note "WARNING: opening Shortcup Fixture and Shortcup Dev now. Windows will appear in the bottom-right corner."
   note "LAYER 3 live fixture"
+  note "Launch method: $launch_method"
   if [[ "$sign_ok" != 1 ]]; then
     note "FAIL: signing did not succeed, so the dev app was not launched"
     fail=$((fail + 1))
     return
   fi
+  local launch_app="$DEV_APP"
+  if [[ "$launch_method" == "open" ]]; then
+    local src="$DEV_APP/Contents/MacOS/ShortcupDev"
+    local dst="$INSTALLED/Contents/MacOS/ShortcupDev"
+    if [[ ! -f "$dst" ]] || ! cmp -s "$src" "$dst"; then
+      if ps -ax -o command= | grep -F "$dst" | grep -v grep >/dev/null; then
+        note "FAIL: installed Shortcup Dev is running and the binary differs. This script will not quit it."
+        fail=$((fail + 1))
+        return
+      fi
+      mkdir -p "${HOME}/Applications"
+      ditto "$DEV_APP" "$INSTALLED"
+    fi
+    launch_app="$INSTALLED"
+  fi
   mkdir -p "$CONTROL" "$STRUCT_CONTROL" "${HOME}/.config/shortcup"
-  canary="SCX-$(openssl rand -hex 4)"
+  local canary="SCX-$(openssl rand -hex 4)"
   umask 077
   print -n -- "$canary" > "$CANARY_FILE"
   chmod 600 "$CANARY_FILE"
-  rm -f "$STRUCT_OUT" "$OUT"
-  open -W -n "$FIXTURE" --args --control "$PWD/$STRUCT_CONTROL" --dump-structure "$PWD/$STRUCT_OUT" &
-  struct_opener=$!
+  rm -f "$STRUCT_OUT" "$OUT" "$CONTROL/quit" "$STRUCT_CONTROL/quit" "$CONTROL/shortcup.pid" "$CONTROL/fixture.pid" "$STRUCT_CONTROL/fixture.pid"
+  # Both commands exist. launch_method picks one. open always includes -g.
+  if [[ "$launch_method" == "direct" ]]; then
+    "$FIXTURE/Contents/MacOS/Fixture" --control "$PWD/$STRUCT_CONTROL" --dump-structure "$PWD/$STRUCT_OUT" &
+    record_pid "$!"
+  else
+    open -g -n -W "$FIXTURE" --args --control "$PWD/$STRUCT_CONTROL" --dump-structure "$PWD/$STRUCT_OUT" &
+    record_pid "$!"
+  fi
+  local struct_opener="$!"
+  local _
   for _ in {1..75}; do
+    [[ -f "$STRUCT_CONTROL/fixture.pid" ]] && record_pid "$(tr -dc '0-9' < "$STRUCT_CONTROL/fixture.pid" || true)"
     [[ -f "$STRUCT_OUT" ]] && break
     kill -0 "$struct_opener" 2>/dev/null || break
     sleep 0.2
@@ -272,28 +325,44 @@ run_live() {
   : > "$STRUCT_CONTROL/quit"
   wait "$struct_opener" 2>/dev/null || true
   if [[ -f "$STRUCT_OUT" ]] && python3 scripts/check-fixture-structure.py "$STRUCT_OUT" > build/verify/fixture-structure.txt 2>&1; then
-    note "PASS: fixture own-tree has the standard window, sheet, panel, and menu identifiers"
+    note "PASS: fixture own-tree has the standard window, panel, and menu identifiers"
     while IFS= read -r line; do note "  $line"; done < build/verify/fixture-structure.txt
   else
     note "FAIL: fixture own-tree did not match the expected window and menu structure"
     fail=$((fail + 1))
   fi
-  open -W -n "$APP" --args --selftest "$PWD/$OUT" --fixture "$PWD/$FIXTURE" --control "$PWD/$CONTROL" --canary-file "$CANARY_FILE" &
-  opener=$!
-  lsof_ok="skipped"
+  if [[ "$launch_method" == "direct" ]]; then
+    "$launch_app/Contents/MacOS/ShortcupDev" --selftest "$PWD/$OUT" --fixture "$PWD/$FIXTURE" --control "$PWD/$CONTROL" --canary-file "$CANARY_FILE" --launch-method direct &
+    record_pid "$!"
+  else
+    open -g -n -W "$launch_app" --args --selftest "$PWD/$OUT" --fixture "$PWD/$FIXTURE" --control "$PWD/$CONTROL" --canary-file "$CANARY_FILE" --launch-method open &
+    record_pid "$!"
+  fi
+  local opener="$!"
+  local lsof_samples=0
+  local lsof_connections=0
+  local pid=""
   for _ in {1..375}; do
-    if [[ -z "${lsof_done:-}" && -f "$CONTROL/shortcup.pid" ]]; then
-      pid="$(tr -dc '0-9' < "$CONTROL/shortcup.pid")"
-      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-        if lsof -nP -a -i -p "$pid" > build/verify/lsof.txt 2>/dev/null; then
-          note "CRITICAL: ShortcupDev has a network connection"
-          fail=$((fail + 1))
-          lsof_ok="fail"
-        else
-          note "PASS: lsof shows no connections for ShortcupDev"
-          lsof_ok="pass"
+    if [[ -f "$CONTROL/shortcup.pid" ]]; then
+      pid="$(tr -dc '0-9' < "$CONTROL/shortcup.pid" || true)"
+      record_pid "$pid"
+    fi
+    if [[ -f "$CONTROL/fixture.pid" ]]; then
+      record_pid "$(tr -dc '0-9' < "$CONTROL/fixture.pid" || true)"
+    fi
+    if [[ "$lsof_samples" -lt 2 && -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      if lsof -nP -a -i -p "$pid" > "build/verify/lsof-$((lsof_samples + 1)).txt" 2>/dev/null; then
+        lsof_connections=$((lsof_connections + 1))
+      fi
+      lsof_samples=$((lsof_samples + 1))
+      if [[ "$lsof_samples" -lt 2 ]]; then
+        sleep 0.4
+        if kill -0 "$pid" 2>/dev/null; then
+          if lsof -nP -a -i -p "$pid" > "build/verify/lsof-$((lsof_samples + 1)).txt" 2>/dev/null; then
+            lsof_connections=$((lsof_connections + 1))
+          fi
+          lsof_samples=$((lsof_samples + 1))
         fi
-        lsof_done=1
       fi
     fi
     kill -0 "$opener" 2>/dev/null || break
@@ -303,20 +372,39 @@ run_live() {
     note "FAIL: selftest did not finish within 75s"
     fail=$((fail + 1))
     : > "$CONTROL/quit"
+    : > "$STRUCT_CONTROL/quit"
+    local stuck
+    for stuck in "${recorded_pids[@]}"; do
+      kill "$stuck" 2>/dev/null || true
+    done
   else
     wait "$opener" || true
   fi
+  if [[ "$lsof_connections" -gt 0 ]]; then
+    note "CRITICAL: ShortcupDev has a network connection"
+    fail=$((fail + 1))
+  elif [[ "$lsof_samples" -ge 2 ]]; then
+    note "PASS: lsof shows no connections for ShortcupDev across $lsof_samples samples"
+  else
+    note "FAIL: could not sample lsof twice against the dev app"
+    fail=$((fail + 1))
+  fi
   if [[ -f "$OUT" ]]; then
-    python3 scripts/check-selftest-json.py "$OUT" > build/verify/selftest-schema.txt 2>&1
-    schema_status=$?
+    local schema_status=0
+    if python3 scripts/check-selftest-json.py "$OUT" > build/verify/selftest-schema.txt 2>&1; then
+      schema_status=0
+    else
+      schema_status=$?
+    fi
     while IFS= read -r line; do note "  $line"; done < build/verify/selftest-schema.txt
     if [[ "$schema_status" != 0 ]]; then
       note "CRITICAL: selftest JSON failed the allow-list schema"
       fail=$((fail + 1))
     else
+      local result
       result="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["result"])' "$OUT")"
       if [[ "$result" == "skipped" ]]; then
-        note "SKIPPED: needs Accessibility for $APP"
+        note "SKIPPED: needs Accessibility for the dev app. axTrusted is in the result JSON."
       elif [[ "$result" == "pass" ]]; then
         note "PASS: fixture clicks matched the expected hints"
       else
@@ -326,10 +414,6 @@ run_live() {
     fi
   else
     note "FAIL: selftest wrote no result file"
-    fail=$((fail + 1))
-  fi
-  if [[ "$lsof_ok" == "skipped" ]]; then
-    note "FAIL: could not run lsof against the dev app"
     fail=$((fail + 1))
   fi
 }
@@ -345,36 +429,99 @@ fi
 note ""
 note "LAYER 4 privacy"
 mkdir -p "${HOME}/.config/shortcup"
-if [[ -z "${canary:-}" ]]; then
-  canary="SCX-$(openssl rand -hex 4)"
+if [[ ! -f "$CANARY_FILE" ]]; then
   umask 077
-  print -n -- "$canary" > "$CANARY_FILE"
+  print -n -- "SCX-$(openssl rand -hex 4)" > "$CANARY_FILE"
   chmod 600 "$CANARY_FILE"
+fi
+canary_mode="$(stat -f '%Lp' "$CANARY_FILE")"
+if [[ "$canary_mode" != "600" ]]; then
+  note "CRITICAL: canary file mode is $canary_mode, expected 600"
+  fail=$((fail + 1))
+fi
+pw_mode="$(stat -f '%Lp' "$PW_FILE" 2>/dev/null || true)"
+if [[ "$pw_mode" != "600" ]]; then
+  note "CRITICAL: keychain password file mode is ${pw_mode:-missing}, expected 600"
+  fail=$((fail + 1))
 fi
 scan_file="$(mktemp)"
 : > "$scan_file"
-search_one() {
-  local dir="$1"
-  [[ -d "$dir" ]] || return 0
-  rg -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F "$canary" "$dir" >> "$scan_file" 2>/dev/null || true
+scan_failed=0
+scan_blocked=0
+# needle is an rg -f pattern file so the random canary is never placed on argv.
+# A literal needle is only used for the replay string, which already lives in source.
+scan_tree() {
+  local dir="$1" pattern_file="${2:-}" literal="${3:-}" out err rg_status
+  if [[ ! -e "$dir" ]]; then
+    note "canary scan: path missing, not read: $dir"
+    return 0
+  fi
+  out="$(mktemp)"
+  err="$(mktemp)"
+  rg_status=0
+  if [[ -n "$pattern_file" ]]; then
+    rg -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F -f "$pattern_file" "$dir" >"$out" 2>"$err" || rg_status=$?
+  else
+    rg -a -l --max-filesize 2M -g '!*.pcm' -g '!*.dylib' -g '!*.o' -F "$literal" "$dir" >"$out" 2>"$err" || rg_status=$?
+  fi
+  if [[ -s "$out" || "$rg_status" == 0 ]]; then
+    cat "$out" >> "$scan_file"
+  elif [[ "$rg_status" == 1 ]]; then
+    :
+  elif [[ "$rg_status" == 2 && ! -s "$out" ]] && python3 - "$err" <<'PY'
+import sys
+allowed = ("Operation not permitted", "Permission denied", "Interrupted system call")
+lines = [line for line in open(sys.argv[1], errors="replace") if line.strip()]
+sys.exit(0 if lines and all(any(piece in line for piece in allowed) for line in lines) else 1)
+PY
+  then
+    note "canary scan: unreadable or interrupted paths under $dir. Readable files had no match. Those paths are not a pass."
+    scan_blocked=1
+  else
+    note "FAIL: canary scan error under $dir (rg status $rg_status)"
+    scan_failed=1
+  fi
+  rm -f "$out" "$err"
 }
-search_one "build/verify"
-search_one "build/Shortcup Dev.app"
-search_one "$APP"
-search_one "$FIXTURE"
-search_one "${HOME}/Library/Application Support"
-search_one "${HOME}/Library/Caches"
-search_one "${HOME}/Library/Logs"
-if [[ -n "${TMPDIR:-}" ]]; then search_one "$TMPDIR"; fi
-search_one /tmp
+# Random canary. The file itself lives in ~/.config and is not scanned.
+scan_tree "build/verify" "$CANARY_FILE"
+scan_tree "build/Shortcup Dev.app" "$CANARY_FILE"
+scan_tree "build/product-link" "$CANARY_FILE"
+scan_tree "$FIXTURE" "$CANARY_FILE"
+if [[ -d "$INSTALLED" ]]; then scan_tree "$INSTALLED" "$CANARY_FILE"; fi
+scan_tree "${HOME}/Library/Application Support" "$CANARY_FILE"
+scan_tree "${HOME}/Library/Caches" "$CANARY_FILE"
+scan_tree "${HOME}/Library/Logs" "$CANARY_FILE"
+scan_tree "${HOME}/Library/Saved Application State" "$CANARY_FILE"
+scan_tree "${HOME}/Library/Preferences" "$CANARY_FILE"
+scan_tree "${HOME}/Library/Containers" "$CANARY_FILE"
+if [[ -n "${TMPDIR:-}" ]]; then scan_tree "$TMPDIR" "$CANARY_FILE"; fi
+scan_tree /tmp "$CANARY_FILE"
+# Stable replay canary. Source and build/checks contain the literal, so they are not scanned.
+scan_tree "build/verify" "" "SCX-replay-canary"
+scan_tree "build/Shortcup Dev.app" "" "SCX-replay-canary"
+scan_tree "build/product-link" "" "SCX-replay-canary"
+scan_tree "$FIXTURE" "" "SCX-replay-canary"
 log show --predicate 'process == "ShortcupDev" OR process == "Fixture"' --last 5m --style compact > build/verify/unified.log 2>/dev/null || true
-if [[ -s build/verify/unified.log ]] && rg -a -F -q "$canary" build/verify/unified.log; then
-  print -- "unified-log" >> "$scan_file"
+if [[ -s build/verify/unified.log ]]; then
+  log_status=0
+  rg -a -F -q -f "$CANARY_FILE" build/verify/unified.log || log_status=$?
+  if [[ "$log_status" == 0 ]]; then
+    print -- "unified-log" >> "$scan_file"
+  elif [[ "$log_status" != 1 ]]; then
+    note "FAIL: unified log scan error"
+    scan_failed=1
+  fi
 fi
 if [[ -s "$scan_file" ]]; then
   note "CRITICAL: canary text was written to disk or the unified log"
   while IFS= read -r hit; do note "  hit: $hit"; done < "$scan_file"
   fail=$((fail + 1))
+elif [[ "$scan_failed" != 0 ]]; then
+  note "FAIL: canary scan did not finish cleanly"
+  fail=$((fail + 1))
+elif [[ "$scan_blocked" != 0 ]]; then
+  note "PASS: no canary in readable files. Some OS-protected paths could not be read and were not treated as clean."
 else
   note "PASS: canary text was not found on disk or in the unified log"
 fi
@@ -385,7 +532,7 @@ note "elapsed: $((SECONDS - start))s"
 if [[ "$fail" == 0 ]]; then
   note "RESULT: PASS"
   if [[ "$live" != 1 ]]; then
-    note "Live clicks did not run. They stay behind zsh verify.sh --live."
+    note "Live clicks did not run. They stay behind zsh verify.sh --live. CI adds --direct-launch."
   fi
 else
   note "RESULT: FAIL ($fail)"

@@ -14,7 +14,6 @@ if [[ ! -f "$PW_FILE" ]]; then
   openssl rand -base64 32 > "$PW_FILE"
   chmod 600 "$PW_FILE"
 fi
-PW="$(cat "$PW_FILE")"
 
 append_search_list() {
   local -a cleaned
@@ -28,6 +27,27 @@ append_search_list() {
     [[ -f "$trimmed" ]] && cleaned+=("$trimmed")
   done < <(security list-keychains -d user)
   security list-keychains -d user -s "${cleaned[@]}" "$KEYCHAIN"
+}
+
+keychain_in_search_list() {
+  local line trimmed
+  while IFS= read -r line; do
+    trimmed="${line//\"/}"
+    trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
+    trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
+    [[ "$trimmed" == "$KEYCHAIN" ]] && return 0
+  done < <(security list-keychains -d user)
+  return 1
+}
+
+ensure_private_mode() {
+  local f mode
+  for f in "$PW_FILE" "${CONF_DIR}/dev-key.pem" "${CONF_DIR}/dev-cert.pem"; do
+    [[ -f "$f" ]] || continue
+    chmod 600 "$f"
+    mode="$(stat -f '%Lp' "$f")"
+    [[ "$mode" == "600" ]]
+  done
 }
 
 if ! security find-certificate -c "$NAME" "$KEYCHAIN" >/dev/null 2>&1; then
@@ -51,20 +71,29 @@ EOF
   cp "$work/cert.pem" "${CONF_DIR}/dev-cert.pem"
   chmod 600 "${CONF_DIR}/dev-key.pem" "${CONF_DIR}/dev-cert.pem"
   if [[ ! -f "$KEYCHAIN" ]]; then
-    security create-keychain -p "$PW" "$KEYCHAIN"
+    python3 "$PWD/scripts/keychain.py" create "$KEYCHAIN" "$PW_FILE"
   fi
-  append_search_list
+  if ! keychain_in_search_list; then
+    append_search_list
+  fi
   security set-keychain-settings "$KEYCHAIN"
-  security unlock-keychain -p "$PW" "$KEYCHAIN"
-  security import "$work/cert.pem" -k "$KEYCHAIN" >/dev/null
-  security import "$work/key.pem" -k "$KEYCHAIN" -T /usr/bin/codesign -T /usr/bin/security >/dev/null
-  security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$PW" "$KEYCHAIN" >/dev/null
+  python3 "$PWD/scripts/keychain.py" unlock "$KEYCHAIN" "$PW_FILE"
+  # PKCS#8 PEM keys do not pair with the certificate on import. A legacy PKCS#12
+  # does. Its wrapping password is a temp file, not the keychain password.
+  # -A lets codesign use the key without set-key-partition-list, which prompts.
+  umask 077
+  print -n -- "import-once" > "$work/p12pass"
+  openssl pkcs12 -export -legacy -inkey "$work/key.pem" -in "$work/cert.pem" -out "$work/dev.p12" -passout "file:$work/p12pass" >/dev/null
+  security import "$work/dev.p12" -k "$KEYCHAIN" -P import-once -A -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+  python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN"
   rm -rf "$work"
   trap - EXIT
 else
-  append_search_list
-  security unlock-keychain -p "$PW" "$KEYCHAIN"
+  if ! keychain_in_search_list; then
+    append_search_list
+  fi
 fi
+ensure_private_mode
 
 echo "identity=Shortcup Dev"
 echo "keychain=$KEYCHAIN"
