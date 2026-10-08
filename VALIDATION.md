@@ -104,11 +104,15 @@ Safari의 탭 닫기가 `performClose:`인지는 이 덤프에 없다. 실제 �
 
 ## 빠른 검증
 
-`zsh verify.sh`는 앱을 열지 않는다. 클릭도 보내지 않는다. 스냅샷 재생, 제품 바이너리에 개발용 자가시험이 없는 것, 전용 키체인 서명, 결과 JSON 형식, 디스크의 카나리 문자열만 본다. 창을 띄우는 검사는 `zsh verify.sh --live` 뒤에만 있다. 그 플래그는 화면에 경고를 찍은 뒤 오른쪽 아래 모서리에 작은 픽스처 창을 연다. 기본 명령으로는 실행하지 않는다.
+`zsh verify.sh`는 앱을 열지 않는다. 클릭도 보내지 않는다. 스냅샷 재생, 제품 바이너리에 개발용 자가시험이 없는 것, 전용 키체인 서명, 결과 JSON 형식, 디스크의 카나리 문자열만 본다. 창을 띄우는 검사는 `zsh verify.sh --live` 뒤에만 있다. 그 플래그는 화면에 경고를 찍은 뒤 오른쪽 아래 모서리에 작은 픽스처 창을 연다. 기본 명령으로는 실행하지 않는다. `--direct-launch`만 주고 `--live`를 빼면 아무 앱도 시작하지 않는다.
 
-서명은 로그인 키체인이 아니라 `~/Library/Keychains/shortcup-dev.keychain-db`의 `Shortcup Dev` 인증서를 쓴다. 비밀번호 파일은 `~/.config/shortcup/keychain-password`(모드 600)이고 저장소에 넣지 않는다. 개발 앱은 `~/Applications/Shortcup Dev.app`, 번들 ID는 `com.shortcup.dev`라서 `~/shortcup`의 앱과 권한이 섞이지 않는다. `codesign -d -r-`에 `certificate leaf`가 있어야 재빌드 뒤에도 같은 권한으로 남는다.
+서명은 로그인 키체인이 아니라 `~/Library/Keychains/shortcup-dev.keychain-db`의 `Shortcup Dev` 인증서를 쓴다. 비밀번호 파일은 `~/.config/shortcup/keychain-password`(모드 600)이고 저장소에 넣지 않는다. 비밀번호는 argv로 넘기지 않는다. `scripts/keychain.py`가 그 파일을 읽어 키체인을 연다. SAFE 모드는 `build/Shortcup Dev.app`에만 서명하고 `~/Applications`로 복사하지 않는다. `--live`이면서 실행 방법이 `open`일 때만, 설치본이 없거나 바이너리가 다를 때 `~/Applications/Shortcup Dev.app`으로 복사한다. 실행 중인 개발 앱은 끝내지 않고 서명 단계를 실패로 둔다. 번들 ID는 `com.shortcup.dev`라서 `~/shortcup`의 앱과 권한이 섞이지 않는다. `codesign -d -r-`에 `certificate leaf`가 있어야 재빌드 뒤에도 같은 권한으로 남는다.
 
-`--selftest`와 합성 클릭은 `-D SHORTCUP_DEV` 빌드에만 들어간다. 제품 빌드에는 컴파일하지 않는다. 클릭은 픽스처 번들 ID와 pid가 둘 다 맞을 때만 보낸다. 터미널에서 바이너리를 직접 실행하면 부모 앱의 손쉬운 사용 권한을 물려받으므로, 라이브 모드는 `open`으로만 띄운다. Terminal이나 Cursor에 손쉬운 사용을 주지 않는다.
+`--selftest`와 합성 클릭은 `-D SHORTCUP_DEV` 빌드에만 들어간다. 제품 빌드에는 컴파일하지 않는다. 클릭은 픽스처 창 프레임 안이고, 시스템 전역 hit의 pid가 픽스처와 같을 때만 검사한다. pid가 다르면 다른 속성을 읽지 않고 `skip`으로 남긴다. 닫기·최소화·전체 화면·확대(줌) 버튼은 클릭하지 않는다. 케이스 결과는 `pass`, `fail`, `skip`이다. `skip`은 통과가 아니다.
+
+이 Mac의 기본 실행은 `open -g -n -W`다. `-g`는 앱을 앞으로 가져오지 않는다. GitHub의 macos-26 러너에서는 bash가 직접 시작한 프로세스가 손쉬운 사용을 받고, `open -g`로 띄운 애드혹 앱은 LaunchServices가 그 앱을 책임 프로세스로 만들어서 못 받을 수 있다. 러너에서는 `zsh verify.sh --live --direct-launch` 또는 `SHORTCUP_LAUNCH=direct zsh verify.sh --live`를 쓴다. 이 Mac에서 바이너리를 직접 실행하면 터미널이나 Cursor의 손쉬운 사용을 물려받으므로, 여기서의 기본은 `open -g`다. Terminal이나 Cursor에 손쉬운 사용을 주지 않는다.
+
+두 방식 모두 개발 앱과 픽스처는 `LSUIElement`이고 Dock 아이콘이 없다. `activate`를 부르지 않고, 키 윈도우가 되지 않는다. 모달 시트 대신 활성화되지 않는 패널을 쓴다. 개발 앱은 결과 JSON에 자기 `AXIsProcessTrusted()` 값(`axTrusted`)과 실행 방법(`launchMethod`: `open` 또는 `direct`)을 적는다. `verify.sh`가 개발 앱에 `--launch-method open|direct`를 넘기고, 그 값이 JSON에 들어간다. 멈춘 실행은 quit 파일을 만든 뒤, 그 실행이 기록한 pid만 종료한다.
 
 Chrome·Finder 스냅샷은 위의 메뉴 덤프를 재생용 JSON으로 옮긴 것이다. 라이브 녹화는 개발 앱의 손쉬운 사용이 생긴 뒤에야 가능해서, 아직 그 앱으로 다시 받지는 않았다. 글리프 99(Caps Lock)와 103(Help)는 힌트가 없다. 이 규칙은 바꾸지 않았다. 이 Mac의 일반 창은 `AXFullScreenButton`을 주지 않는다(오류 -25212). Chrome의 전체 화면 단축키 `⌃⌘ F`는 스냅샷으로 확인한다.
 

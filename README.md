@@ -33,7 +33,7 @@ open build/Shortcup.app
 
 ## 검증
 
-`zsh build.sh`는 단축키 포맷·모호한 연결 거부·비활성 명령 제외·최근 힌트 검사를 실행합니다. 앱을 띄우지 않는 전체 검사는 `zsh verify.sh`입니다. 창을 여는 검사는 `zsh verify.sh --live`이며, 기본 명령은 그 경로를 타지 않습니다. 방법과 한 번만 할 설정은 [VALIDATION.md](VALIDATION.md)에 있습니다.
+`zsh build.sh`는 단축키 포맷·모호한 연결 거부·비활성 명령 제외·최근 힌트 검사를 실행합니다. 앱을 띄우지 않는 전체 검사는 `zsh verify.sh`입니다. 창을 여는 검사는 `zsh verify.sh --live`이며, 기본 명령은 그 경로를 타지 않습니다. 이 Mac의 기본 실행 방법은 `open -g`이고, CI는 `--direct-launch`(또는 `SHORTCUP_LAUNCH=direct`)를 붙입니다. 방법과 한 번만 할 설정은 [VALIDATION.md](VALIDATION.md)에 있습니다.
 
 실제 입력 검증은 **별도 명시적 실행**입니다. Safari·Chrome·Finder의 테스트 창을 조작하므로 다른 작업을 잠시 멈추고 실행하세요.
 
