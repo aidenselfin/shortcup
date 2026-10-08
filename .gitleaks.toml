@@ -136,6 +136,15 @@ targetRules = ["owner-device"]
 commits = ["c5e8e8b546bd72ae9211f84afb922d09c72cbc48"]
 paths = ['''^verify\.sh$''']
 
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["macos-user-path"]
+commits = ["e2798d69b9651918b17251778b9ca4a9526ccb0c"]
+paths = [
+  '''^\.gitleaks\.toml$''',
+  '''^scripts/privacy-check-selftest\.sh$''',
+]
+
 # Public history from before this check. Pinned to commit and rule.
 [[allowlists]]
 description = "historical home paths"

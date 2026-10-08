@@ -324,7 +324,11 @@ e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh macos
 e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh owner-device
 e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml users-path
 e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml macos-user-path
-c5e8e8b546bd72ae9211f84afb922d09c72cbc48 verify.sh owner-device"
+c5e8e8b546bd72ae9211f84afb922d09c72cbc48 verify.sh owner-device
+e2798d69b9651918b17251778b9ca4a9526ccb0c .gitleaks.toml users-path
+e2798d69b9651918b17251778b9ca4a9526ccb0c .gitleaks.toml macos-user-path
+e2798d69b9651918b17251778b9ca4a9526ccb0c scripts/privacy-check-selftest.sh users-path
+e2798d69b9651918b17251778b9ca4a9526ccb0c scripts/privacy-check-selftest.sh macos-user-path"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
