@@ -117,6 +117,6 @@ KNOWN-FAIL 두 개는 실패로 세지 않고, 통과로 치지도 않는다. �
 ### 나중에 `--live`를 켤 때 한 번만 할 일
 
 1. 저장소에서 `zsh setup-dev-signing.sh`. 전용 키체인에 인증서를 만든다. 이 Mac에는 이미 만들어져 있다. 로그인 키체인 암호 창이 뜨면 취소한다. 서명에 그 창은 필요 없다.
-2. 시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서 **Shortcup Dev** (`/Users/juhyeon/Applications/Shortcup Dev.app`, `com.shortcup.dev`)만 켠다. 켠 뒤 그 앱을 끝내고 다시 연다.
+2. 시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서 **Shortcup Dev** (`~/Applications/Shortcup Dev.app`, `com.shortcup.dev`)만 켠다. 켠 뒤 그 앱을 끝내고 다시 연다.
 3. 스위치는 켜져 있는데 `verify.sh --live`가 여전히 권한 없음이면, 그 번들만 `tccutil reset Accessibility com.shortcup.dev` 하고 다시 켠다. 다른 앱은 리셋하지 않는다.
 4. Terminal과 Cursor에는 손쉬운 사용을 주지 않는다.
