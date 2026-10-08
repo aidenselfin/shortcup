@@ -252,9 +252,11 @@ scripts/privacy-fixtures/fake-github-token.txt"
 legacy_paths="94d496732e60e1551155b01aea4ec3ca5b2b2d04 fixture
 2542ec18fff050c167074836f8120369f5cd28d0 fixture
 e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh
-e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml
-ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh
-f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh"
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml"
+
+# PR-only: remove after squash merge
+pr_only_allow="ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh private-key
+f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh private-key"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
@@ -341,8 +343,19 @@ function in_list(list, item,    n, i, parts) {
   }
   return 0
 }
+function pr_exempt(path, rule,    n, i, a, lines) {
+  n = split(pr_only, lines, "\n")
+  for (i = 1; i <= n; i++) {
+    if (lines[i] == "") continue
+    split(lines[i], a, " ")
+    if (a[1] == commit && a[2] == path && a[3] == rule) {
+      return 1
+    }
+  }
+  return 0
+}
 function say(where, n, rule) {
-  if (index(" " allow " ", " " rule " ") == 0) {
+  if (index(" " allow " ", " " rule " ") == 0 && !pr_exempt(where, rule)) {
     print where ":" n " " rule
   }
 }
@@ -378,6 +391,7 @@ AWK
 run_awk() {
   local body=$4
   PC_FIXTURES=$fixture_paths PC_MARKER=$fixture_marker PC_LEGACY=$1 PC_ALLOW=$2 PC_WHERE=$3 \
+    PC_COMMIT=${PC_COMMIT-} PC_PR_ONLY=$pr_only_allow \
     awk "${awk_lib}
 BEGIN {
   fixtures = ENVIRON[\"PC_FIXTURES\"]
@@ -385,6 +399,8 @@ BEGIN {
   legacy = ENVIRON[\"PC_LEGACY\"]
   allow = ENVIRON[\"PC_ALLOW\"]
   where = ENVIRON[\"PC_WHERE\"]
+  commit = ENVIRON[\"PC_COMMIT\"]
+  pr_only = ENVIRON[\"PC_PR_ONLY\"]
 }
 ${body}" "${@:5}"
 }
@@ -489,7 +505,35 @@ run_one_gitleaks() {
     echo "gitleaks-report-mismatch" >&2
     exit 2
   fi
-  cat "$work/parsed" >> "$found_file"
+  if [[ -n "${GITLEAKS_FILTER_COMMIT:-}" ]]; then
+    filter_decoded_findings "$GITLEAKS_FILTER_COMMIT" "$work/parsed" >> "$found_file"
+  else
+    cat "$work/parsed" >> "$found_file"
+  fi
+}
+
+# Drop findings that the commit allowlists already cover. Used for dir scans,
+# which have no commit SHA of their own.
+filter_decoded_findings() {
+  local commit=$1 src=$2 line path rest rule skip allow
+  skip=$(legacy_skips "$commit")
+  allow=$(allowed_rules "$commit")
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    path=${line%%:*}
+    rest=${line#*:}
+    rule=${rest##* }
+    case $'\n'"$skip"$'\n' in
+      *$'\n'"$path"$'\n'*) continue ;;
+    esac
+    case " $allow " in
+      *" $rule "*) continue ;;
+    esac
+    case $'\n'"$pr_only_allow"$'\n' in
+      *$'\n'"$commit $path $rule"$'\n'*) continue ;;
+    esac
+    printf '%s\n' "$line"
+  done < "$src"
 }
 
 run_gitleaks() {
@@ -543,28 +587,22 @@ run_gitleaks() {
     git rev-list "${rev_args[@]}" > "$work/commits"
     while IFS= read -r commit; do
       [[ -n "$commit" ]] || continue
-      skip=$(legacy_skips "$commit")
       git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
       while IFS= read -r -d '' file; do
         [[ -n "$file" ]] || continue
-        case $'\n'"$skip"$'\n'$'\n'"$fixture_paths"$'\n' in
-          *$'\n'"$file"$'\n'*) continue ;;
-        esac
         [[ "$(git cat-file -t "${commit}:${file}" 2> /dev/null)" == blob ]] || continue
         mkdir -p "$decoded/${commit}/$(dirname "$file")"
         decode_blob "$commit" "$file" "$decoded/${commit}/${file}"
       done < "$work/added"
-    done < "$work/commits"
-    if [[ -n "$(find "$decoded" -type f -print -quit 2> /dev/null)" ]]; then
-      (
-        cd "$decoded"
-        run_one_gitleaks "$work/decoded.json" 0 dir .
-      )
-      # Findings keep repo-relative names; the commit directory is only storage.
-      if [[ -s "$found_file" ]]; then
-        sed -E 's#^[0-9a-f]{40}/##' "$found_file" > "$work/stripped" && mv "$work/stripped" "$found_file"
+      if [[ -n "$(find "$decoded/$commit" -type f -print -quit 2> /dev/null)" ]]; then
+        GITLEAKS_FILTER_COMMIT=$commit
+        (
+          cd "$decoded/$commit"
+          run_one_gitleaks "$work/decoded-${commit}.json" 0 dir .
+        )
+        unset GITLEAKS_FILTER_COMMIT
       fi
-    fi
+    done < "$work/commits"
   fi
 }
 
@@ -616,7 +654,7 @@ builtin_check() {
       [[ -n "$commit" ]] || continue
       allow=$(allowed_rules "$commit")
       git log -1 --format=%B "$commit" | tr -d '\000' |
-        run_awk "" "$allow" "$commit" '$0 != "" { report(where, FNR, $0) }' >> "$found_file"
+        PC_COMMIT=$commit run_awk "" "$allow" "$commit" '$0 != "" { report(where, FNR, $0) }' >> "$found_file"
     done < "$work/commits"
     return 0
   fi
@@ -633,13 +671,13 @@ builtin_check() {
     allow=$(allowed_rules "$commit")
 
     git log -1 --format=%B "$commit" | tr -d '\000' |
-      run_awk "" "$allow" "$commit" '$0 != "" { report(where, FNR, $0) }' >> "$found_file"
+      PC_COMMIT=$commit run_awk "" "$allow" "$commit" '$0 != "" { report(where, FNR, $0) }' >> "$found_file"
 
     # Headers are read only until the first @@ of each file, so an added line whose
     # text looks like "++ /dev/null" is still treated as content.
     git -c core.quotePath=false log -1 -m -p -U0 --text --no-color --no-ext-diff --format= "$commit" |
       tr -d '\000' |
-      run_awk "$legacy" "$allow" "" '
+      PC_COMMIT=$commit run_awk "$legacy" "$allow" "" '
         /^diff --git / { file = ""; header = 1; newline = 0; next }
         header == 1 && /^\+\+\+ / {
           file = substr($0, 5)
@@ -673,7 +711,7 @@ builtin_check() {
     # each merge parent, and -z keeps non-ASCII names unquoted.
     git diff-tree -z -r -m --root --no-commit-id --no-renames --diff-filter=A --name-only "$commit" > "$work/added"
     tr '\000' '\n' < "$work/added" |
-      run_awk "$legacy" "$allow" "" '$0 != "" { name_rules($0) }' >> "$found_file"
+      PC_COMMIT=$commit run_awk "$legacy" "$allow" "" '$0 != "" { name_rules($0) }' >> "$found_file"
 
     while IFS= read -r -d '' file; do
       [[ -n "$file" ]] || continue
