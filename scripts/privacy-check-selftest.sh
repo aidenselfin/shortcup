@@ -39,6 +39,8 @@ fake_user="someone"
 fake_path="/Users/${fake_user}/fake-not-a-real-home"
 fake_device="Someone-Fake'""s MacBook"
 fake_host="${fake_user}-MacBook-Pro.local"
+pk_begin="BEGIN"
+pk_kind="FAKE PRIVATE KEY"
 
 tmp=$(mktemp -d)
 cleanup() {
