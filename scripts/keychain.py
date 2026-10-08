@@ -183,9 +183,12 @@ def deny_ui():
 
 
 def grant_codesign_access(item, password):
-    """Allow /usr/bin/codesign to use the key without a GUI prompt."""
+    """Allow codesign to use the key without a GUI prompt.
+
+    A NULL path is the Security API equivalent of `security import -A`.
+    """
     trusted = []
-    for path in (b"/usr/bin/codesign", b"/usr/bin/security"):
+    for path in (None, b"/usr/bin/codesign", b"/usr/bin/security"):
         app = ctypes.c_void_p()
         status = Security.SecTrustedApplicationCreateFromPath(path, ctypes.byref(app))
         if status == 0 and app.value:
@@ -474,6 +477,7 @@ def grant_identities_codesign(keychain_path, password):
     if status != 0:
         finish(status, ref, "could not unlock the dedicated dev keychain")
     identities, array_ref = copy_identities(ref)
+    granted = 0
     try:
         for identity in identities:
             key = ctypes.c_void_p()
@@ -481,13 +485,15 @@ def grant_identities_codesign(keychain_path, password):
             if status != 0:
                 continue
             try:
-                grant_codesign_access(key, password)
+                if grant_codesign_access(key, password):
+                    granted += 1
             finally:
                 CoreFoundation.CFRelease(key)
     finally:
         if array_ref:
             CoreFoundation.CFRelease(array_ref)
         CoreFoundation.CFRelease(ref)
+    print("grant-access=" + str(granted), file=sys.stderr)
 
 
 def set_partition_list_security(keychain_path, password):

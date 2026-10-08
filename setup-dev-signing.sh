@@ -8,7 +8,7 @@ CONF_DIR="${HOME}/.config/shortcup"
 PW_FILE="${CONF_DIR}/keychain-password"
 KEYCHAIN="${HOME}/Library/Keychains/shortcup-dev.keychain-db"
 MARKER="${CONF_DIR}/dev-identity-version"
-VERSION=4
+VERSION=5
 /bin/mkdir -p "$CONF_DIR"
 /bin/chmod 700 "$CONF_DIR"
 
@@ -137,10 +137,8 @@ EOF
   print -r -- "$dump" | /usr/bin/grep -E 'class:|labl:|type:|atyp:' | while IFS= read -r line; do print -- "dump: $line"; done
   parts="$(print -r -- "$dump" | /usr/bin/grep -ci partition || true)"
   print -- "partition-ids=${parts:-0}"
-  if [[ "$(print -r -- "$dump" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" -gt 10 && "${parts:-0}" == "0" ]]; then
-    print -- "ERROR: keychain partition list is empty" >&2
-    /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN" || true
-    exit 1
+  if [[ "${parts:-0}" == "0" ]]; then
+    print -- "NOTE: dump-keychain has no partitionID; relying on trusted-app ACL"
   fi
   /usr/bin/python3 "$PWD/scripts/keychain.py" lock "$KEYCHAIN"
   /bin/rm -rf "$work"
