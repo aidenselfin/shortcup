@@ -148,6 +148,21 @@ if grep -n 'hint.title' Sources/App.swift >/dev/null; then
   note "KNOWN-FAIL: menu and toolbar validation logs still store command titles (validation-events.jsonl). Expected until the v0.1 fix."
   known=$((known + 1))
 fi
+if python3 scripts/test-launch-guard.py > build/verify/launch-guard-test.txt 2>&1; then
+  note "$(cat build/verify/launch-guard-test.txt)"
+else
+  note "FAIL: launch guard cases"
+  while IFS= read -r line; do note "  $line"; done < build/verify/launch-guard-test.txt
+  fail=$((fail + 1))
+fi
+# Command-line stubs under build/stop-test only. No app is started.
+if python3 scripts/test-stop-launched.py > build/verify/stop-test.txt 2>&1; then
+  note "$(tail -n 1 build/verify/stop-test.txt)"
+else
+  note "FAIL: hung-run stop helper"
+  tail -n 20 build/verify/stop-test.txt | while IFS= read -r line; do note "  $line"; done
+  fail=$((fail + 1))
+fi
 if python3 scripts/check-launch-guard.py > build/verify/launch-guard.txt 2>&1; then
   note "PASS: app launch is only inside the --live section, and both open -g and a direct executable launch are present there"
 else
@@ -179,6 +194,9 @@ if swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/
     fail=$((fail + 1))
   elif strings -a build/product-link/Shortcup | grep -q 'com.shortcup.fixture'; then
     note "CRITICAL: product binary contains the fixture selftest"
+    fail=$((fail + 1))
+  elif nm build/product-link/Shortcup | grep -q 'ForTesting'; then
+    note "FAIL: product binary exposes a ForTesting hook"
     fail=$((fail + 1))
   else
     note "PASS: product build has no fixture selftest and no dead self-test branch"
