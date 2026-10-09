@@ -867,15 +867,10 @@ else
   echo "note: could not hide gitleaks from PATH; skipped the missing-gitleaks hook case" >&2
 fi
 
-# 9. This HEAD's history stays clean under the production config. Fetch only
-# HEAD so leftover branches (and checkout --fetch-depth 0) are not scanned.
-real="$tmp/real"
-git init -q "$real"
-git -C "$real" fetch -q --no-tags "$root" HEAD:refs/heads/scan
-git -C "$real" checkout -q scan
+# 9. This repository stays clean under the production config.
 out=""
 set +e
-out=$(bash "$check" --repo "$real" --all 2> "$tmp/err")
+out=$(bash "$check" --repo "$root" --all 2> "$tmp/err")
 code=$?
 set -e
 [[ ! -s "$tmp/err" ]] || fail real-repo-stderr
@@ -884,7 +879,7 @@ set -e
   fail real-repo-flagged
 }
 set +e
-out=$(bash "$check" --repo "$real" --all --gitleaks --config "$root/.gitleaks.toml" 2> "$tmp/err")
+out=$(bash "$check" --repo "$root" --all --gitleaks 2> "$tmp/err")
 code=$?
 set -e
 [[ ! -s "$tmp/err" ]] || fail real-repo-gitleaks-stderr

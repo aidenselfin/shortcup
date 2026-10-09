@@ -5,6 +5,7 @@
 # Must run on bash 3.2 and the awk shipped with macOS.
 set -euo pipefail
 export LC_ALL=C
+unset PC_FILTER_COMMIT PC_COMMIT PC_STRIP_PREFIX
 
 usage() {
   cat >&2 << 'EOF'
