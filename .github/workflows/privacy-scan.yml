@@ -1,0 +1,130 @@
+name: privacy-scan
+
+on:
+  push:
+    branches:
+      - "**"
+    tags:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  privacy-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      RANGE_BEFORE: ${{ github.event.before }}
+      RANGE_AFTER: ${{ github.event.after }}
+      PR_BASE: ${{ github.event.pull_request.base.sha }}
+      PR_HEAD: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          asset="gitleaks_${version}_linux_x64.tar.gz"
+          expected="551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          curl -fsSL -o "$work/$asset" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${asset}"
+          curl -fsSL -o "$work/checksums.txt" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_checksums.txt"
+          (
+            cd "$work"
+            grep -F " ${asset}" checksums.txt | sha256sum -c -
+          )
+          actual=$(sha256sum "$work/$asset" | awk '{print $1}')
+          if [[ "$actual" != "$expected" ]]; then
+            echo "checksum-mismatch" >&2
+            exit 1
+          fi
+          install_dir="${RUNNER_TEMP}/gitleaks"
+          mkdir -p "$install_dir"
+          tar -xzf "$work/$asset" -C "$install_dir" gitleaks
+          chmod +x "$install_dir/gitleaks"
+          "$install_dir/gitleaks" version | grep -qx "$version"
+          echo "$install_dir" >> "$GITHUB_PATH"
+
+      - name: Self-test
+        run: |
+          set -euo pipefail
+          bash scripts/privacy-check-selftest.sh
+
+      - name: Gitleaks
+        run: |
+          set -euo pipefail
+          bash scripts/privacy-check.sh --ci --gitleaks
+
+      - name: Privacy check
+        run: |
+          set -euo pipefail
+          bash scripts/privacy-check.sh --ci
+
+      # A PR can edit its own copy of the scanner, so the base branch's scanner and
+      # config also run against the PR's merge commit.
+      - name: Base branch scanner
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          dir="${RUNNER_TEMP}/base-scanner"
+          mkdir -p "$dir"
+          if git cat-file -e "${PR_BASE}:scripts/privacy-check.sh" 2> /dev/null &&
+            git cat-file -e "${PR_BASE}:.gitleaks.toml" 2> /dev/null; then
+            git archive "$PR_BASE" scripts/privacy-check.sh .gitleaks.toml | tar -x -C "$dir"
+            bash "$dir/scripts/privacy-check.sh" --repo "$GITHUB_WORKSPACE" --config "$dir/.gitleaks.toml" --ci --gitleaks
+            bash "$dir/scripts/privacy-check.sh" --repo "$GITHUB_WORKSPACE" --config "$dir/.gitleaks.toml" --ci
+          else
+            echo "::warning::The base branch has no privacy scanner yet, so only this PR's copy ran."
+          fi
+
+  # The self-test once more with macOS system bash and awk.
+  selftest-macos:
+    runs-on: macos-26
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          version=8.30.1
+          asset="gitleaks_${version}_darwin_arm64.tar.gz"
+          expected="b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5"
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          curl -fsSL -o "$work/$asset" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/${asset}"
+          curl -fsSL -o "$work/checksums.txt" "https://github.com/gitleaks/gitleaks/releases/download/v${version}/gitleaks_${version}_checksums.txt"
+          (
+            cd "$work"
+            grep -F " ${asset}" checksums.txt | shasum -a 256 -c -
+          )
+          actual=$(shasum -a 256 "$work/$asset" | awk '{print $1}')
+          if [[ "$actual" != "$expected" ]]; then
+            echo "checksum-mismatch" >&2
+            exit 1
+          fi
+          install_dir="${RUNNER_TEMP}/gitleaks"
+          mkdir -p "$install_dir"
+          tar -xzf "$work/$asset" -C "$install_dir" gitleaks
+          chmod +x "$install_dir/gitleaks"
+          "$install_dir/gitleaks" version | grep -qx "$version"
+
+      - name: Self-test with system bash and awk
+        run: |
+          set -euo pipefail
+          export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${RUNNER_TEMP}/gitleaks"
+          /bin/bash -c 'echo "bash $BASH_VERSION"'
+          /bin/bash scripts/privacy-check-selftest.sh
