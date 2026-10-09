@@ -302,8 +302,35 @@ scripts/privacy-fixtures/fake-github-token.txt"
 # entry skips that exact path in that exact commit.
 legacy_paths=""
 
-# PR-only: remove after PR #2 squash merge.
-pr_only_allow="c5e8e8b546bd72ae9211f84afb922d09c72cbc48 verify.sh owner-device"
+# 옛 브랜치 cursor/privacy-scan-4ac9 삭제 시 제거.
+# c5e8e8b5 / verify.sh: PR #2 squash merge 뒤 제거.
+pr_only_allow="ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh private-key
+f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh private-key
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-user-path.txt users-path
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-user-path.txt macos-user-path
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-github-token.txt github-token
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-github-token.txt github-pat
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-private-key.txt private-key
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/keychain-password forbidden-filename
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/keychain-password keychain-password-file
+94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/macos-user-path.toml macos-user-path
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-user-path.txt users-path
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-user-path.txt macos-user-path
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-github-token.txt github-token
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-github-token.txt github-pat
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/fake-private-key.txt private-key
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/keychain-password forbidden-filename
+2542ec18fff050c167074836f8120369f5cd28d0 scripts/privacy-fixtures/keychain-password keychain-password-file
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh users-path
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh macos-user-path
+e02dcd713c1e20ce619e5961da4a585dd918d36b scripts/privacy-check-selftest.sh owner-device
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml users-path
+e02dcd713c1e20ce619e5961da4a585dd918d36b .gitleaks.toml macos-user-path
+c5e8e8b546bd72ae9211f84afb922d09c72cbc48 verify.sh owner-device
+e2798d69b9651918b17251778b9ca4a9526ccb0c .gitleaks.toml users-path
+e2798d69b9651918b17251778b9ca4a9526ccb0c .gitleaks.toml macos-user-path
+e2798d69b9651918b17251778b9ca4a9526ccb0c scripts/privacy-check-selftest.sh users-path
+e2798d69b9651918b17251778b9ca4a9526ccb0c scripts/privacy-check-selftest.sh macos-user-path"
 
 # Public history from before this check. Only the named rule is ignored, and only
 # for that exact commit. Mirrored in .gitleaks.toml.
