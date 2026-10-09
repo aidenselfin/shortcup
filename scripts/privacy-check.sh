@@ -5,6 +5,7 @@
 # Must run on bash 3.2 and the awk shipped with macOS.
 set -euo pipefail
 export LC_ALL=C
+unset PC_FILTER_COMMIT PC_COMMIT PC_STRIP_PREFIX
 
 usage() {
   cat >&2 << 'EOF'
@@ -301,7 +302,8 @@ scripts/privacy-fixtures/fake-github-token.txt"
 # entry skips that exact path in that exact commit.
 legacy_paths=""
 
-# PR-only: remove after squash merge. c5e8e8b5 / verify.sh: remove after PR #2 squash merge.
+# 옛 브랜치 cursor/privacy-scan-4ac9 삭제 시 제거.
+# c5e8e8b5 / verify.sh: PR #2 squash merge 뒤 제거.
 pr_only_allow="ac3d859d4547d96dc01d43f6819144be7fce7496 scripts/privacy-check-selftest.sh private-key
 f09b7d309a9461e0d6a0c2220be817199f96a258 scripts/privacy-check-selftest.sh private-key
 94d496732e60e1551155b01aea4ec3ca5b2b2d04 scripts/privacy-fixtures/fake-user-path.txt users-path
@@ -552,7 +554,8 @@ decode_blob() {
 leak_code=77
 
 parse_report() {
-  PC_FIXTURES=$fixture_paths PC_MARKER=$fixture_marker PC_REPO=$repo python3 - "$1" "${2:-}" << 'PY'
+  PC_FIXTURES=$fixture_paths PC_MARKER=$fixture_marker PC_REPO=$repo \
+    PC_FILTER_COMMIT=${PC_FILTER_COMMIT-} python3 - "$1" "${2:-}" << 'PY'
 import json
 import os
 import re
@@ -711,7 +714,7 @@ for item in data:
     if rel in fixtures and marker:
         commit = str(item.get("Commit") or "").strip()
         if not commit:
-            commit = os.environ.get("GITLEAKS_FILTER_COMMIT", "").strip()
+            commit = os.environ.get("PC_FILTER_COMMIT", "").strip()
         source = read_source_line(scanned, rel, line, commit)
         if marker in source:
             skip = skip_rule(source)
@@ -760,8 +763,8 @@ run_one_gitleaks() {
     echo "gitleaks-report-mismatch" >&2
     exit 2
   fi
-  if [[ -n "${GITLEAKS_FILTER_COMMIT:-}" ]]; then
-    filter_decoded_findings "$GITLEAKS_FILTER_COMMIT" "$work/parsed" >> "$found_file"
+  if [[ -n "${PC_FILTER_COMMIT:-}" ]]; then
+    filter_decoded_findings "$PC_FILTER_COMMIT" "$work/parsed" >> "$found_file"
   else
     cat "$work/parsed" >> "$found_file"
   fi
@@ -847,10 +850,9 @@ run_gitleaks() {
         decode_blob "$commit" "$file" "$decoded/${commit}/${file}"
       done < "$work/added"
       if [[ -n "$(find "$decoded/$commit" -type f -print -quit 2> /dev/null)" ]]; then
-        GITLEAKS_FILTER_COMMIT=$commit
+        PC_FILTER_COMMIT=$commit \
         PC_STRIP_PREFIX=$decoded/$commit \
           run_one_gitleaks "$work/decoded-${commit}.json" 0 dir "$decoded/$commit"
-        unset GITLEAKS_FILTER_COMMIT
       fi
     done < "$work/commits"
   fi
