@@ -650,13 +650,16 @@ def run_watched(command):
     leftover = []
     deadline = time.monotonic() + WATCH_DEADLINE
     try:
-        proc = subprocess.Popen(command, start_new_session=True)
-        ignore = me | {proc.pid}
+        # eslogger must be up before the watched command, or the first ~1s is
+        # polling-only (start_eslogger waits 0.8s after spawn).
+        ignore = set(me)
         if require_es:
             es_proc = start_eslogger()
             if es_proc is None:
                 print("FAIL: eslogger did not start", file=sys.stderr)
                 return 1
+        proc = subprocess.Popen(command, start_new_session=True)
+        ignore = me | {proc.pid}
         while proc.poll() is None:
             if time.monotonic() >= deadline:
                 error = RuntimeError("process watcher deadline")
@@ -673,8 +676,17 @@ def run_watched(command):
             if hits:
                 break
             time.sleep(SAMPLE)
-        if error is None and not hits:
-            hits = sample_hits(lib, ignore, proc.pid)
+        if error is None:
+            if not hits:
+                hits = sample_hits(lib, ignore, proc.pid)
+            if es_proc is not None:
+                # Trailing execs can arrive after the child exits.
+                time.sleep(SAMPLE)
+                try:
+                    hits.extend(eslogger_hits(es_proc, proc.pid, ignore, lib))
+                except RuntimeError:
+                    if require_es:
+                        error = RuntimeError("eslogger exited")
     except KeyboardInterrupt:
         raise
     except Exception as exc:
