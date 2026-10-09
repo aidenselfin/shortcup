@@ -577,6 +577,24 @@ expect_error empty-range
 run --repo "$repo" --range "$feature" "$feature" --gitleaks --config "$config"
 expect_error empty-range-gitleaks
 
+# Empty commit: rev-list is 1 but the trees match, so gitleaks history reports
+# 0 commits scanned. That is a pass; the tree scan still runs.
+repo="$tmp/empty-commit"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+empty_before=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" commit -q --allow-empty -m "empty"
+empty_after=$(git -C "$repo" rev-parse HEAD)
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$empty_before" RANGE_AFTER="$empty_after" \
+  bash "$check" --repo "$repo" --ci --gitleaks --config "$config" 2> "$tmp/err")
+code=$?
+set -e
+expect 0 empty-commit-push-gitleaks
+grep -F -q "note: no tree changes in range, skipping history gitleaks" "$tmp/err" ||
+  fail empty-commit-push-gitleaks-note
+
 # C1: A adds a fake home path, B removes it, main is force-pushed so origin/main
 # already equals the new tip. before is the old main (not an ancestor).
 repo="$tmp/force-main"

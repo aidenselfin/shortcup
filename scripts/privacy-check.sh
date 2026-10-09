@@ -818,8 +818,15 @@ run_gitleaks() {
     run_one_gitleaks "$work/history.json" "$(git rev-list --count --all)" \
       git --log-opts="--all --text -m --no-renames" "$repo"
   elif [[ "$history" -eq 1 ]]; then
-    run_one_gitleaks "$work/history.json" "$commit_count" \
-      git --log-opts="--text -m --no-renames ${rev_args[*]}" "$repo"
+    # An empty commit still has rev-list count 1, but gitleaks reports
+    # "0 commits scanned" when the trees match. That is a pass, not a tool failure.
+    if [[ -n "$files_base" && -n "$files_head" ]] &&
+      git diff --quiet "$files_base" "$files_head"; then
+      echo "note: no tree changes in range, skipping history gitleaks" >&2
+    else
+      run_one_gitleaks "$work/history.json" "$commit_count" \
+        git --log-opts="--text -m --no-renames ${rev_args[*]}" "$repo"
+    fi
   fi
 
   # Tree. The listed files as they are in scan_rev (the merge result on PRs),
