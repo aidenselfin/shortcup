@@ -680,7 +680,7 @@ def run_watched(command):
             if not hits:
                 hits = sample_hits(lib, ignore, proc.pid)
             if es_proc is not None:
-                # Drain after exit: the last loop sample can miss a final exec.
+                # Trailing execs can arrive after the child exits.
                 time.sleep(SAMPLE)
                 try:
                     hits.extend(eslogger_hits(es_proc, proc.pid, ignore, lib))
