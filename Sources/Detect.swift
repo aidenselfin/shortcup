@@ -27,9 +27,78 @@ enum AXAttr {
     static let minimize = "AXMinimizeButton"
     static let fullScreen = "AXFullScreenButton"
     static let zoom = "AXZoomButton"
-    static let description = "AXDescription"
-    static let help = "AXHelp"
-    static let value = "AXValue"
+}
+
+struct ClickPoint: Equatable {
+    var x: Double
+    var y: Double
+}
+
+struct ClickFrame: Equatable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+    func contains(_ point: ClickPoint) -> Bool {
+        point.x >= x && point.y >= y && point.x <= x + width && point.y <= y + height
+    }
+}
+
+// A system-wide pid mismatch stops the check. The caller must not read a scoped hit or any attribute after that.
+func readsScopedHit(systemPID: Int32?, fixturePID: Int32) -> Bool {
+    systemPID == fixturePID
+}
+
+// Close, minimize, zoom, and full screen are never sent as synthetic clicks or AXPress.
+func allowsSyntheticClick(subrole: String) -> Bool {
+    switch subrole {
+    case "AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton":
+        return false
+    default:
+        return true
+    }
+}
+
+enum ClickPermission: Equatable {
+    case skip
+    case inspectOnly
+    case post
+}
+
+// The AXSubrole read at the click point. A timeout or any other failed read is
+// .failed, which never posts: the element could be a window button.
+enum SubroleRead: Equatable {
+    case value(String)
+    case absent
+    case failed
+}
+
+// errorCode is the AXError raw value. Only kAXErrorNoValue (-25212) and
+// kAXErrorAttributeUnsupported (-25205) mean the element has no subrole.
+func subroleRead(errorCode: Int32, value: String?) -> SubroleRead {
+    switch errorCode {
+    case 0:
+        guard let value else { return .failed }
+        return value.isEmpty ? .absent : .value(value)
+    case -25212, -25205:
+        return .absent
+    default:
+        return .failed
+    }
+}
+
+func clickPermission(point: ClickPoint, frames: [ClickFrame], systemPID: Int32?, scopedPID: Int32?, fixturePID: Int32, subrole: SubroleRead) -> ClickPermission {
+    guard frames.contains(where: { $0.contains(point) }) else { return .skip }
+    guard readsScopedHit(systemPID: systemPID, fixturePID: fixturePID) else { return .skip }
+    guard scopedPID == fixturePID else { return .skip }
+    switch subrole {
+    case .failed:
+        return .skip
+    case .absent:
+        return .post
+    case .value(let name):
+        return allowsSyntheticClick(subrole: name) ? .post : .inspectOnly
+    }
 }
 
 struct AXRead: Equatable {
@@ -126,7 +195,11 @@ final class SnapshotWorld: AXReading {
 
     private func raw(_ id: String, _ attribute: String, purpose: String) -> Any? {
         let value = elements[id]?[attribute]
-        let text = value as? String
+        guard axWindowReadAllowList.contains(attribute) else {
+            log.note(attribute: attribute, purpose: purpose, text: nil)
+            return nil
+        }
+        let text = purpose == "toolbar" ? nil : value as? String
         log.note(attribute: attribute, purpose: purpose, text: text)
         return value
     }
@@ -248,9 +321,8 @@ final class WindowMenuSession {
         for element in ancestors {
             let role = world.string(element, AXAttr.role)
             if world.optionalBool(element, AXAttr.enabled) == false { continue }
-            let labels = [world.string(element, AXAttr.title, purpose: "toolbar"),
-                          world.string(element, AXAttr.description, purpose: "toolbar"),
-                          world.string(element, AXAttr.help, purpose: "toolbar")]
+            // Title only. AXDescription and AXHelp are outside the allow-list and are not read.
+            let labels = [world.string(element, AXAttr.title, purpose: "toolbar")]
             for label in labels where !label.isEmpty {
                 let aliases = commandAliases(appID: appID, role: role, label: label)
                 guard !aliases.isEmpty else { continue }

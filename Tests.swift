@@ -206,9 +206,31 @@ import Foundation
         assert(!isWindowMenuDumpCandidate(WindowMenuCandidate(identifier: "orderFront:", title: "Safari", shortcut: nil, enabled: true)))
         for glyph in 111...122 { assert(windowGlyphText(glyph) == "F\(glyph - 110)") }
         assert(axMessagingTimeout == 0.12)
-        var status = StatusLine(message: "클릭 감지를 시작하지 못했습니다")
-        assert(status.showOnce() == "클릭 감지를 시작하지 못했습니다")
-        assert(status.showOnce() == nil)
+        let controller = AppController()
+        controller.setMonitorErrorForTesting("클릭 감지를 시작하지 못했습니다")
+        assert(controller.takeMonitorErrorForTesting() == "클릭 감지를 시작하지 못했습니다")
+        assert(controller.takeMonitorErrorForTesting() == nil)
+        let inside = ClickFrame(x: 10, y: 10, width: 40, height: 20)
+        let spot = ClickPoint(x: 12, y: 14)
+        assert(!readsScopedHit(systemPID: 9, fixturePID: 4))
+        assert(readsScopedHit(systemPID: 4, fixturePID: 4))
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 9, scopedPID: nil, fixturePID: 4, subrole: .absent) == .skip)
+        assert(clickPermission(point: ClickPoint(x: 0, y: 0), frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: .absent) == .skip)
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 8, fixturePID: 4, subrole: .absent) == .skip)
+        for button in ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"] {
+            assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: .value(button)) == .inspectOnly)
+        }
+        assert(!allowsSyntheticClick(subrole: "AXCloseButton"))
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: .absent) == .post)
+        // A timed-out or failed AXSubrole read must not become "" and post a click.
+        assert(subroleRead(errorCode: -25204, value: nil) == .failed)
+        assert(subroleRead(errorCode: -25202, value: nil) == .failed)
+        assert(subroleRead(errorCode: -25200, value: nil) == .failed)
+        assert(subroleRead(errorCode: 0, value: nil) == .failed)
+        assert(subroleRead(errorCode: -25212, value: nil) == .absent)
+        assert(subroleRead(errorCode: -25205, value: nil) == .absent)
+        assert(subroleRead(errorCode: 0, value: "AXCloseButton") == .value("AXCloseButton"))
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: subroleRead(errorCode: -25204, value: nil)) == .skip)
         let localeTable = ["zh_CN": ["Close Window": "关闭窗口"], "en": ["Close Window": "Close Window"]]
         let hans = menuLocaleColumn(localeTable, language: "zh-Hans")
         let zhCN = menuLocaleColumn(localeTable, language: "zh_CN")
@@ -228,6 +250,10 @@ private func plant(_ world: SnapshotWorld, canary: String) {
     world.elements["history-entry"]?["AXTitle"] = canary
     world.elements["bookmark-entry"]?["AXTitle"] = canary
     world.elements["btn-tab"]?["AXTitle"] = canary
+    for id in ["btn-new", "btn-back"] {
+        let title = world.elements[id]?["AXTitle"] as? String ?? ""
+        world.elements[id]?["AXTitle"] = title.isEmpty ? canary : title + " " + canary
+    }
 }
 
 private func replayFixtures() throws {
@@ -291,4 +317,10 @@ private func replayFixtures() throws {
     brokenSession.now = { Date().addingTimeInterval(3) }
     _ = brokenSession.inspect(at: CGPoint(x: 0, y: 0))
     assert(brokenSession.menuWalks == 2)
+
+    let blocked = try loadSnapshot(from: chromeData)
+    blocked.elements["btn-new"]?["AXDescription"] = canary
+    assert(blocked.string("btn-new", "AXDescription", purpose: "toolbar") == "")
+    assert(blocked.log.disallowedAttributes().contains("AXDescription"))
+    assert(!blocked.log.containsText(canary))
 }

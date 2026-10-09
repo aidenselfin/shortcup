@@ -1,0 +1,4 @@
+# Exact repo-relative path and the blob SHA of that file
+# (`git rev-parse HEAD:<path>`). No wildcards. One "path sha" pair per line.
+# png/jpg/jpeg/gif/heic/pdf (and other media the scanner flags) fail until
+# listed here with the current blob SHA. A content change needs a new SHA.

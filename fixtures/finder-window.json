@@ -14,13 +14,14 @@
     "history-item": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "방문 기록", "AXChildren": ["history-menu"]},
     "history-menu": {"AXRole": "AXMenu", "AXChildren": ["history-entry"]},
     "history-entry": {"AXRole": "AXMenuItem", "AXIdentifier": "", "AXTitle": "history-entry", "AXMenuItemCmdChar": "h", "AXMenuItemCmdModifiers": 0, "AXChildren": []},
-    "window": {"AXRole": "AXWindow", "AXSubrole": "AXStandardWindow", "AXTitle": "", "AXParent": "app", "AXCloseButton": "btn-close", "AXMinimizeButton": "btn-min", "AXFullScreenButton": "btn-fs", "AXZoomButton": "btn-zoom", "AXChildren": ["btn-close", "btn-min", "btn-fs", "btn-zoom", "btn-new", "btn-back", "field"]},
+    "window": {"AXRole": "AXWindow", "AXSubrole": "AXStandardWindow", "AXTitle": "", "AXParent": "app", "AXCloseButton": "btn-close", "AXMinimizeButton": "btn-min", "AXFullScreenButton": "btn-fs", "AXZoomButton": "btn-zoom", "AXChildren": ["btn-close", "btn-min", "btn-fs", "btn-zoom", "toolbar", "field"]},
+    "toolbar": {"AXRole": "AXToolbar", "AXParent": "window", "AXChildren": ["btn-new", "btn-back"]},
     "btn-close": {"AXRole": "AXButton", "AXSubrole": "AXCloseButton", "AXParent": "window"},
     "btn-min": {"AXRole": "AXButton", "AXSubrole": "AXMinimizeButton", "AXParent": "window"},
     "btn-fs": {"AXRole": "AXButton", "AXSubrole": "AXFullScreenButton", "AXParent": "window"},
     "btn-zoom": {"AXRole": "AXButton", "AXSubrole": "AXZoomButton", "AXParent": "window"},
-    "btn-new": {"AXRole": "AXButton", "AXTitle": "New Tab", "AXParent": "window"},
-    "btn-back": {"AXRole": "AXButton", "AXTitle": "Back", "AXParent": "window"},
+    "btn-new": {"AXRole": "AXButton", "AXTitle": "New Tab", "AXParent": "toolbar"},
+    "btn-back": {"AXRole": "AXButton", "AXTitle": "Back", "AXParent": "toolbar"},
     "field": {"AXRole": "AXTextField", "AXValue": "field-text", "AXParent": "window"}
   }
 }

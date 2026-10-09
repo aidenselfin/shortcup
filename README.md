@@ -5,7 +5,7 @@
 ## 실행
 
 ```sh
-cd /Users/juhyeon/shortcup
+cd ~/shortcup
 zsh build.sh
 open build/Shortcup.app
 ```
@@ -33,7 +33,7 @@ open build/Shortcup.app
 
 ## 검증
 
-`zsh build.sh`는 단축키 포맷·모호한 연결 거부·비활성 명령 제외·최근 힌트 검사를 실행합니다. 앱을 띄우지 않는 전체 검사는 `zsh verify.sh`입니다. 창을 여는 검사는 `zsh verify.sh --live`이며, 기본 명령은 그 경로를 타지 않습니다. 방법과 한 번만 할 설정은 [VALIDATION.md](VALIDATION.md)에 있습니다.
+`zsh build.sh`는 단축키 포맷·모호한 연결 거부·비활성 명령 제외·최근 힌트 검사를 실행합니다. 앱을 띄우지 않는 전체 검사는 `zsh verify.sh`입니다. 창을 여는 검사는 `zsh verify.sh --live`이며, 기본 명령은 그 경로를 타지 않습니다. 이 Mac의 기본 실행 방법은 `open -g`이고, CI는 `--direct-launch`(또는 `SHORTCUP_LAUNCH=direct`)를 붙입니다. 방법과 한 번만 할 설정은 [VALIDATION.md](VALIDATION.md)에 있습니다.
 
 실제 입력 검증은 **별도 명시적 실행**입니다. Safari·Chrome·Finder의 테스트 창을 조작하므로 다른 작업을 잠시 멈추고 실행하세요.
 
@@ -45,3 +45,23 @@ open -n build/Shortcup.app --args --validate-once
 이미 실행 중인 Shortcup은 먼저 메뉴 막대에서 종료하세요. 검증 모드만 CGEvent로 실제 클릭과 단축키를 보냅니다. 일반 실행에는 입력 생성이 없습니다. 검증 파일은 `build/validation-fixtures`에 생성하며 결과는 `build/validation-results.json`, 힌트는 `build/validation-events.jsonl`, 상태는 `build/validation-state.json`에 남습니다. 검증 기록에는 명령 이름과 단축키만 들어갑니다. `build/validation-enabled`를 삭제하면 일반 실행의 진단 기록을 중단합니다.
 
 고정 범위와 완료 기준은 [PLAN.md](PLAN.md), 실제 검증 결과는 [VALIDATION.md](VALIDATION.md)를 참조하세요.
+
+## 개인정보 검사
+
+GitHub Actions의 `privacy-scan`이 모든 push(브랜치와 태그)와 PR에서 개인 경로, 키·인증서 파일, 토큰을 검사합니다. 결과에는 파일·줄·규칙만 남습니다. 새로 추가된 png/jpg/jpeg/gif/heic/pdf 등은 텍스트로 화면 내용을 검사할 수 없어 기본 거부이며, `scripts/privacy-binary-allowlist.txt`에 경로와 그 파일의 blob SHA를 같이 적은 뒤에만 통과합니다.
+
+푸시 전에 같은 검사를 로컬에서 돌리려면 이 저장소에만 pre-push 훅을 설치하세요. 전역 git 설정은 바꾸지 않습니다.
+
+```sh
+cd ~/shortcup
+bash scripts/install-pre-push-hook.sh
+```
+
+- 훅은 푸시하는 커밋만 검사합니다. 작업 폴더는 보지 않으며, `scripts/`가 없는 브랜치에서도 동작합니다.
+- 기존 pre-push 훅이 있으면 설치를 멈춥니다. 바꾸려면 `--force`를 붙이세요.
+- [gitleaks](https://github.com/gitleaks/gitleaks)가 필요합니다. 없으면 푸시를 거부합니다. 잠시 건너뛰려면 `SHORTCUP_PRIVACY_SKIP_GITLEAKS=1 git push`를 쓰세요. 경고가 출력됩니다.
+- 검사 스크립트를 고친 뒤에는 `--force`로 다시 설치하세요.
+
+`.gitleaks.toml`의 과거 커밋 SHA 허용 목록은 squash 또는 merge commit으로 합치는 것을 전제로 합니다. rebase로 그 커밋의 SHA가 바뀌면 허용이 풀리고 검사가 다시 실패할 수 있습니다.
+
+이 검사가 실제로 막으려면 저장소 주인이 GitHub에서 `privacy-scan`을 필수 검사로 두고, 코드 오너 리뷰를 켜 두어야 합니다. 워크플로 파일만으로는 강제되지 않습니다.
