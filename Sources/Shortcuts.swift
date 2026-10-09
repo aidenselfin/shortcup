@@ -374,7 +374,16 @@ func resolveCommand(_ commands: [MenuCommand], aliases: [String]) -> MenuCommand
 }
 
 // Dock switch: roles, bundle IDs, and file URLs only. No titles, AXValue, or screen text.
+// AXParent and AXURL are a scoped exception: Dock process, Dock-click path, in-memory compare only.
+// Policy: PLAN.md "Dock 앱 전환".
 let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent"]
+let axDockProcessOnlyAttributes: Set<String> = ["AXURL", "AXParent"]
+
+func allowsDockScopedAXRead(attribute: String, hostBundleID: String) -> Bool {
+    guard axDockReadAllowList.contains(attribute) else { return false }
+    if axDockProcessOnlyAttributes.contains(attribute) { return isDockBundleID(hostBundleID) }
+    return true
+}
 
 struct DockSwitchSettings: Equatable {
     var enabled: Bool
@@ -402,6 +411,8 @@ struct DockClickSample: Equatable {
 struct DockActivationSample: Equatable {
     var bundleID: String
     var appName: String
+    // Production always passes false. Cmd+Tab is excluded because an ignored or
+    // unmatched Dock click is cleared and does not stay pending.
     var viaKeyboard: Bool
     var at: Date
 }
@@ -412,6 +423,7 @@ enum DockSwitchVerdict: Equatable {
 }
 
 let dockSwitchTitle = "앱 전환"
+// System Settings does not let a user rebind the app switcher, so ⌘⇥ is fixed.
 let dockSwitchShortcut = shortcutText(character: "", virtualKey: 48, glyph: nil, modifiers: 0) ?? "⌘ ⇥"
 let dockBundleID = "com.apple.dock"
 let shortcupBundleID = "com.shortcup.app"
@@ -465,6 +477,7 @@ func dockSwitchDecision(click: DockClickSample, activation: DockActivationSample
     guard settings.enabled else { return .ignore }
     guard !click.hasModifier, !activation.viaKeyboard else { return .ignore }
     guard isDockBundleID(click.hostBundleID) else { return .ignore }
+    guard !isIgnoredDockSubrole(click.subrole) else { return .ignore }
     guard isDockApplicationItem(role: click.role, subrole: click.subrole) else { return .ignore }
     guard let target = click.targetBundleID, !target.isEmpty, !isShortcupBundleID(target) else { return .ignore }
     guard click.runningContainsTarget else { return .ignore }
@@ -509,13 +522,15 @@ struct DockSwitchCorrelator: Equatable {
 
     private mutating func match(now: Date) -> Hint? {
         guard let click = pendingClick, let act = pendingActivation else { return nil }
-        guard dockSwitchDecision(click: click, activation: act, lastHintAt: lastHintAt, settings: settings) == .show else {
-            return nil
+        if dockSwitchDecision(click: click, activation: act, lastHintAt: lastHintAt, settings: settings) == .show {
+            pendingClick = nil
+            pendingActivation = nil
+            lastHintAt = now
+            return dockSwitchHint(appID: act.bundleID, appName: act.appName)
         }
         pendingClick = nil
         pendingActivation = nil
-        lastHintAt = now
-        return dockSwitchHint(appID: act.bundleID, appName: act.appName)
+        return nil
     }
 }
 

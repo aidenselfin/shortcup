@@ -107,6 +107,7 @@ final class ClickListener {
     func noteDockActivation(bundleID: String, appName: String, now: Date = Date()) -> Hint? {
         var hint: Hint?
         queue.sync {
+            // viaKeyboard stays false. Cmd+Tab is ignored because a leftover Dock click is cleared.
             hint = self.dock.noteActivation(DockActivationSample(bundleID: bundleID, appName: appName, viaKeyboard: false, at: now), now: now)
         }
         return hint
@@ -139,25 +140,30 @@ final class ClickListener {
         }
     }
 
-    // Dock process only. AXRole, AXSubrole, AXParent, AXURL. URL is matched in memory and not stored on the sample.
+    private func bundleID(of element: AXUIElement) -> String? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              let runningApp = NSRunningApplication(processIdentifier: pid) else { return nil }
+        return runningApp.bundleIdentifier
+    }
+
+    // Dock process only. AXRole and AXSubrole first. AXParent and AXURL only after the owner is Dock.
     private func dockClickSample(point: CGPoint, flags: CGEventFlags, now: Date) -> DockClickSample? {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, 0.12)
         var hit: AXUIElement?
         guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit else { return nil }
-        var hitPID: pid_t = 0
-        guard AXUIElementGetPid(hit, &hitPID) == .success,
-              let runningApp = NSRunningApplication(processIdentifier: hitPID) else { return nil }
-        let host = runningApp.bundleIdentifier ?? ""
-        guard isDockBundleID(host) else { return nil }
+        guard let host = bundleID(of: hit), isDockBundleID(host) else { return nil }
         AXUIElementSetMessagingTimeout(hit, 0.12)
         var node: AXUIElement? = hit
         for _ in 0..<6 {
             guard let current = node else { break }
+            guard let owner = bundleID(of: current), isDockBundleID(owner) else { return nil }
             AXUIElementSetMessagingTimeout(current, 0.12)
             let role = axAllowedString(current, kAXRoleAttribute, allow: axDockReadAllowList)
             let subrole = axAllowedString(current, kAXSubroleAttribute, allow: axDockReadAllowList)
             if isDockItemRole(role) {
+                guard allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: owner) else { return nil }
                 let url = axAllowedURLString(current, allow: axDockReadAllowList)
                 let running = NSWorkspace.shared.runningApplications.compactMap { app -> DockRunningApp? in
                     guard let id = app.bundleIdentifier, let bundleURL = app.bundleURL else { return nil }
@@ -169,6 +175,7 @@ final class ClickListener {
                                        frontmostBundleID: front, runningContainsTarget: target != nil,
                                        hasModifier: dockModifiersHeld(flags), at: now)
             }
+            guard allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: owner) else { return nil }
             node = axAllowedElement(current, kAXParentAttribute, allow: axDockReadAllowList)
         }
         return nil
@@ -689,9 +696,6 @@ final class AppController: NSObject, NSApplicationDelegate {
             let name = app.localizedName ?? "앱"
             if let hint = listener.noteDockActivation(bundleID: id, appName: name) {
                 history.add(hint)
-                activeID = hint.appID
-                activeName = hint.appName
-                render()
             }
         }
         updateActive()
