@@ -1,7 +1,7 @@
 import Foundation
 
 @main struct Checks {
-    static func main() {
+    static func main() throws {
         assert(shortcutText(character: "t", virtualKey: nil, glyph: nil, modifiers: 0) == "⌘ T")
         assert(shortcutText(character: "t", virtualKey: nil, glyph: nil, modifiers: 1) == "⇧⌘ T")
         assert(shortcutText(character: "", virtualKey: 123, glyph: nil, modifiers: 4) == "⌃⌘ ←")
@@ -204,6 +204,123 @@ import Foundation
         assert(findings.contains { $0.contains("fullscreen-bare-f=true") })
         assert(isWindowMenuDumpCandidate(WindowMenuCandidate(identifier: "commandDispatch:", title: "탭 닫기", shortcut: "⌘ W", enabled: true)))
         assert(!isWindowMenuDumpCandidate(WindowMenuCandidate(identifier: "orderFront:", title: "Safari", shortcut: nil, enabled: true)))
+        for glyph in 111...122 { assert(windowGlyphText(glyph) == "F\(glyph - 110)") }
+        assert(axMessagingTimeout == 0.12)
+        let controller = AppController()
+        controller.setMonitorErrorForTesting("클릭 감지를 시작하지 못했습니다")
+        assert(controller.takeMonitorErrorForTesting() == "클릭 감지를 시작하지 못했습니다")
+        assert(controller.takeMonitorErrorForTesting() == nil)
+        let inside = ClickFrame(x: 10, y: 10, width: 40, height: 20)
+        let spot = ClickPoint(x: 12, y: 14)
+        assert(!readsScopedHit(systemPID: 9, fixturePID: 4))
+        assert(readsScopedHit(systemPID: 4, fixturePID: 4))
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 9, scopedPID: nil, fixturePID: 4, subrole: .absent) == .skip)
+        assert(clickPermission(point: ClickPoint(x: 0, y: 0), frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: .absent) == .skip)
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 8, fixturePID: 4, subrole: .absent) == .skip)
+        for button in ["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"] {
+            assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: .value(button)) == .inspectOnly)
+        }
+        assert(!allowsSyntheticClick(subrole: "AXCloseButton"))
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: .absent) == .post)
+        // A timed-out or failed AXSubrole read must not become "" and post a click.
+        assert(subroleRead(errorCode: -25204, value: nil) == .failed)
+        assert(subroleRead(errorCode: -25202, value: nil) == .failed)
+        assert(subroleRead(errorCode: -25200, value: nil) == .failed)
+        assert(subroleRead(errorCode: 0, value: nil) == .failed)
+        assert(subroleRead(errorCode: -25212, value: nil) == .absent)
+        assert(subroleRead(errorCode: -25205, value: nil) == .absent)
+        assert(subroleRead(errorCode: 0, value: "AXCloseButton") == .value("AXCloseButton"))
+        assert(clickPermission(point: spot, frames: [inside], systemPID: 4, scopedPID: 4, fixturePID: 4, subrole: subroleRead(errorCode: -25204, value: nil)) == .skip)
+        let localeTable = ["zh_CN": ["Close Window": "关闭窗口"], "en": ["Close Window": "Close Window"]]
+        let hans = menuLocaleColumn(localeTable, language: "zh-Hans")
+        let zhCN = menuLocaleColumn(localeTable, language: "zh_CN")
+        assert(hans?["Close Window"] == "关闭窗口")
+        assert(hans == zhCN)
+        assert(menuLocaleColumn(localeTable, language: "zh-Hans") == menuLocaleColumn(localeTable, language: "zh-Hans"))
+        try replayFixtures()
         print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history, window button mapping")
+        print("PASS: snapshot replay, glyph table, locale, cache, AX allow-list")
     }
+}
+
+private func plant(_ world: SnapshotWorld, canary: String) {
+    world.elements["window"]?["AXTitle"] = canary
+    world.elements["panel"]?["AXTitle"] = canary
+    world.elements["field"]?["AXValue"] = canary
+    world.elements["history-entry"]?["AXTitle"] = canary
+    world.elements["bookmark-entry"]?["AXTitle"] = canary
+    world.elements["btn-tab"]?["AXTitle"] = canary
+    for id in ["btn-new", "btn-back"] {
+        let title = world.elements[id]?["AXTitle"] as? String ?? ""
+        world.elements[id]?["AXTitle"] = title.isEmpty ? canary : title + " " + canary
+    }
+}
+
+private func replayFixtures() throws {
+    let root = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+    let canary = "SCX-replay-canary"
+    let chromeData = try Data(contentsOf: root.appendingPathComponent("fixtures/chrome-window.json"))
+    let chrome = try loadSnapshot(from: chromeData)
+    plant(chrome, canary: canary)
+    let chromeSession = WindowMenuSession(world: chrome)
+    func click(_ id: String, world: SnapshotWorld, session: WindowMenuSession) -> Hint? {
+        world.hit = id
+        return session.inspect(at: CGPoint(x: 0, y: 0))
+    }
+    assert(click("btn-zoom", world: chrome, session: chromeSession) == nil)
+    assert(chrome.log.titleFallbackCount == 0)
+    assert(!chrome.log.snapshot().map(\.attribute).contains("AXTitle") || chrome.log.titleFallbackCount == 0)
+    let close = click("btn-close", world: chrome, session: chromeSession)
+    assert(close?.shortcut == "⇧⌘ W")
+    assert(close?.source == "window")
+    assert(click("btn-min", world: chrome, session: chromeSession)?.shortcut == "⌘ M")
+    let full = click("btn-fs", world: chrome, session: chromeSession)
+    assert(full?.shortcut == "⌃⌘ F")
+    assert(full?.shortcut?.contains("🌐") != true)
+    assert(click("btn-tab", world: chrome, session: chromeSession) == nil)
+    assert(click("btn-sheet", world: chrome, session: chromeSession) == nil)
+    assert(click("btn-panel", world: chrome, session: chromeSession) == nil)
+    assert(!chrome.log.containsText(canary))
+    assert(chrome.log.disallowedAttributes().isEmpty)
+    let walks = chromeSession.menuWalks
+    assert(click("btn-close", world: chrome, session: chromeSession)?.shortcut == "⇧⌘ W")
+    assert(chromeSession.menuWalks == walks)
+    let idle = chrome.log.count
+    chromeSession.now = { Date().addingTimeInterval(10) }
+    chromeSession.refreshWindowMenus(pid: chrome.pidValue, bundleID: chrome.bundleID)
+    assert(chromeSession.menuWalks == walks)
+    assert(chrome.log.count == idle)
+
+    let finder = try loadSnapshot(from: Data(contentsOf: root.appendingPathComponent("fixtures/finder-window.json")))
+    plant(finder, canary: canary)
+    let finderSession = WindowMenuSession(world: finder)
+    assert(click("btn-new", world: finder, session: finderSession) == nil)
+    assert(click("btn-back", world: finder, session: finderSession) == nil)
+    assert(click("btn-close", world: finder, session: finderSession)?.shortcut == "⌘ W")
+    assert(click("btn-min", world: finder, session: finderSession)?.shortcut == "⌘ M")
+    assert(click("btn-fs", world: finder, session: finderSession)?.shortcut == "⌃⌘ F")
+    assert(click("btn-zoom", world: finder, session: finderSession) == nil)
+    assert(finder.log.titleFallbackCount > 0)
+    assert(!finder.log.containsText(canary))
+    assert(finder.log.disallowedAttributes().isEmpty)
+    let again = click("btn-close", world: finder, session: finderSession)?.shortcut
+    assert(again == "⌘ W")
+
+    let broken = try loadSnapshot(from: chromeData)
+    broken.elements["app"]?.removeValue(forKey: "AXMenuBar")
+    let brokenSession = WindowMenuSession(world: broken)
+    broken.hit = "btn-close"
+    assert(brokenSession.inspect(at: CGPoint(x: 0, y: 0)) == nil)
+    assert(brokenSession.menuWalks == 1)
+    assert(brokenSession.inspect(at: CGPoint(x: 0, y: 0)) == nil)
+    assert(brokenSession.menuWalks == 1)
+    brokenSession.now = { Date().addingTimeInterval(3) }
+    _ = brokenSession.inspect(at: CGPoint(x: 0, y: 0))
+    assert(brokenSession.menuWalks == 2)
+
+    let blocked = try loadSnapshot(from: chromeData)
+    blocked.elements["btn-new"]?["AXDescription"] = canary
+    assert(blocked.string("btn-new", "AXDescription", purpose: "toolbar") == "")
+    assert(blocked.log.disallowedAttributes().contains("AXDescription"))
+    assert(!blocked.log.containsText(canary))
 }

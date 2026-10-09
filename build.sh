@@ -1,25 +1,90 @@
 #!/bin/zsh
 set -eu
+setopt NO_BARE_GLOB_QUAL
 cd "${0:A:h}"
-case "${1:-}" in
-  "" | --no-sign) ;;
+sign=1
+mode="${1:-}"
+case "$mode" in
+  "") mode=product ;;
+  --no-sign)
+    mode=product
+    sign=0
+    ;;
+  --checks-only | --dev | --fixture) ;;
   *)
-    print "usage: zsh build.sh [--no-sign]" >&2
+    print -- "usage: zsh build.sh [--no-sign | --checks-only | --dev | --fixture]" >&2
     exit 2
     ;;
 esac
-mkdir -p build/module-cache build/Shortcup.app/Contents/MacOS
+/bin/mkdir -p build/module-cache
 typeset -F SECONDS
 unit_started=$SECONDS
-swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Tests.swift -o build/checks
+/usr/bin/swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
 ./build/checks
-printf 'unit-tests-seconds: %.3f\n' $((SECONDS - unit_started))
-app_started=$SECONDS
-swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
-cp Info.plist build/Shortcup.app/Contents/Info.plist
-if [[ "${1:-}" != "--no-sign" ]]; then
-  codesign --force --sign - --identifier com.shortcup.app build/Shortcup.app
+if [[ "$mode" == "product" ]]; then
+  printf 'unit-tests-seconds: %.3f\n' $((SECONDS - unit_started))
 fi
-touch build/Shortcup.app
+if [[ "$mode" == "--checks-only" ]]; then
+  print "Checks passed"
+  exit 0
+fi
+if [[ "$mode" == "--dev" ]]; then
+  /bin/mkdir -p "build/Shortcup Dev.app/Contents/MacOS"
+  /usr/bin/swiftc -D SHORTCUP_DEV -module-cache-path build/module-cache \
+    Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Sources/SelfTest.swift \
+    -o "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" \
+    -framework AppKit -framework ApplicationServices -framework Carbon
+  minos="$(/usr/bin/vtool -show-build "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" | /usr/bin/python3 scripts/vtool-minos.py)"
+  [[ -n "$minos" ]]
+  /bin/cat > "build/Shortcup Dev.app/Contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>ShortcupDev</string>
+<key>CFBundleIdentifier</key><string>com.shortcup.dev</string>
+<key>CFBundleName</key><string>Shortcup Dev</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>0.1.0</string>
+<key>CFBundleVersion</key><string>1</string>
+<key>LSMinimumSystemVersion</key><string>${minos}</string>
+<key>LSUIElement</key><true/>
+<key>NSHighResolutionCapable</key><true/>
+</dict></plist>
+EOF
+  print "Built: $PWD/build/Shortcup Dev.app"
+  exit 0
+fi
+if [[ "$mode" == "--fixture" ]]; then
+  /bin/mkdir -p "build/Shortcup Fixture.app/Contents/MacOS"
+  /usr/bin/swiftc -module-cache-path build/module-cache Fixture/main.swift \
+    -o "build/Shortcup Fixture.app/Contents/MacOS/Fixture" -framework AppKit
+  /bin/cat > "build/Shortcup Fixture.app/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleExecutable</key><string>Fixture</string>
+<key>CFBundleIdentifier</key><string>com.shortcup.fixture</string>
+<key>CFBundleName</key><string>Shortcup Fixture</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>LSMinimumSystemVersion</key><string>26.0</string>
+<key>LSUIElement</key><true/>
+</dict></plist>
+EOF
+  /usr/bin/codesign --force --sign - --identifier com.shortcup.fixture "build/Shortcup Fixture.app"
+  print "Built: $PWD/build/Shortcup Fixture.app"
+  exit 0
+fi
+/bin/mkdir -p build/Shortcup.app/Contents/MacOS
+app_started=$SECONDS
+/usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
+minos="$(/usr/bin/vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | /usr/bin/python3 scripts/vtool-minos.py)"
+[[ -n "$minos" ]]
+# Keep the checked-in plist in sync with the binary before copying it into the bundle.
+/usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minos" Info.plist
+/bin/cp Info.plist build/Shortcup.app/Contents/Info.plist
+if [[ "$sign" == 1 ]]; then
+  /usr/bin/codesign --force --sign - --identifier com.shortcup.app build/Shortcup.app
+fi
+/usr/bin/touch build/Shortcup.app
 printf 'app-build-seconds: %.3f\n' $((SECONDS - app_started))
 print "Built: $PWD/build/Shortcup.app"
