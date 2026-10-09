@@ -818,7 +818,15 @@ run_gitleaks() {
     run_one_gitleaks "$work/history.json" "$(git rev-list --count --all)" \
       git --log-opts="--all --text -m --no-renames" "$repo"
   elif [[ "$history" -eq 1 ]]; then
-    run_one_gitleaks "$work/history.json" "$commit_count" \
+    # Empty commits have rev-list count 1, but gitleaks reports "0 commits
+    # scanned". Allow that only when no commit in the range has a path change.
+    # Start and end trees matching is not enough: an add then a delete must scan.
+    local expect=$commit_count
+    if [[ -z "$(git log --format= --name-only -m --no-renames "${rev_args[@]}")" ]]; then
+      expect=0
+      echo "note: no path changes in range" >&2
+    fi
+    run_one_gitleaks "$work/history.json" "$expect" \
       git --log-opts="--text -m --no-renames ${rev_args[*]}" "$repo"
   fi
 

@@ -577,6 +577,47 @@ expect_error empty-range
 run --repo "$repo" --range "$feature" "$feature" --gitleaks --config "$config"
 expect_error empty-range-gitleaks
 
+# Empty commit: rev-list is 1 but no path changes, so gitleaks history reports
+# 0 commits scanned. That is a pass; the tree scan still runs.
+repo="$tmp/empty-commit"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+empty_before=$(git -C "$repo" rev-parse HEAD)
+git -C "$repo" commit -q --allow-empty -m "empty"
+empty_after=$(git -C "$repo" rev-parse HEAD)
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$empty_before" RANGE_AFTER="$empty_after" \
+  bash "$check" --repo "$repo" --ci --gitleaks --config "$config" 2> "$tmp/err")
+code=$?
+set -e
+expect 0 empty-commit-push-gitleaks
+grep -F -q "note: no path changes in range" "$tmp/err" ||
+  fail empty-commit-push-gitleaks-note
+
+# Add then delete: start and end trees match, but the middle commit is public
+# history and must still fail.
+repo="$tmp/add-then-remove"
+new_repo "$repo"
+printf '%s\n' "ok" > "$repo/ok.txt"
+commit_all "$repo" "base"
+ar_before=$(git -C "$repo" rev-parse HEAD)
+printf '%s\n' "$fake_path/add-then-remove" > "$repo/added-path.txt"
+commit_all "$repo" "add path"
+git -C "$repo" rm -q added-path.txt
+commit_all "$repo" "remove path"
+ar_after=$(git -C "$repo" rev-parse HEAD)
+set +e
+out=$(GITHUB_EVENT_NAME=push RANGE_BEFORE="$ar_before" RANGE_AFTER="$ar_after" \
+  bash "$check" --repo "$repo" --ci --gitleaks --config "$config" 2> "$tmp/err")
+code=$?
+set -e
+expect 1 add-then-remove-push-gitleaks
+has added-path.txt macos-user-path
+if grep -F -q "note: no path changes in range" "$tmp/err"; then
+  fail add-then-remove-skipped-history
+fi
+
 # C1: A adds a fake home path, B removes it, main is force-pushed so origin/main
 # already equals the new tip. before is the old main (not an ancestor).
 repo="$tmp/force-main"
