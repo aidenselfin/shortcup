@@ -373,6 +373,152 @@ func resolveCommand(_ commands: [MenuCommand], aliases: [String]) -> MenuCommand
     return matches.first
 }
 
+// Dock switch: roles, bundle IDs, and file URLs only. No titles, AXValue, or screen text.
+let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent"]
+
+struct DockSwitchSettings: Equatable {
+    var enabled: Bool
+    var correlationWindow: TimeInterval
+    var cooldown: TimeInterval
+    static let standard = DockSwitchSettings(enabled: true, correlationWindow: 0.8, cooldown: 12)
+}
+
+struct DockRunningApp: Equatable {
+    var bundleID: String
+    var urlString: String
+}
+
+struct DockClickSample: Equatable {
+    var hostBundleID: String
+    var role: String
+    var subrole: String
+    var targetBundleID: String?
+    var frontmostBundleID: String
+    var runningContainsTarget: Bool
+    var hasModifier: Bool
+    var at: Date
+}
+
+struct DockActivationSample: Equatable {
+    var bundleID: String
+    var appName: String
+    var viaKeyboard: Bool
+    var at: Date
+}
+
+enum DockSwitchVerdict: Equatable {
+    case show
+    case ignore
+}
+
+let dockSwitchTitle = "앱 전환"
+let dockSwitchShortcut = shortcutText(character: "", virtualKey: 48, glyph: nil, modifiers: 0) ?? "⌘ ⇥"
+let dockBundleID = "com.apple.dock"
+let shortcupBundleID = "com.shortcup.app"
+
+func isDockBundleID(_ id: String) -> Bool { id == dockBundleID }
+func isShortcupBundleID(_ id: String) -> Bool { id == shortcupBundleID }
+func isDockItemRole(_ role: String) -> Bool { role == "AXDockItem" }
+func isDockApplicationItem(role: String, subrole: String) -> Bool {
+    isDockItemRole(role) && subrole == "AXApplicationDockItem"
+}
+
+func isIgnoredDockSubrole(_ subrole: String) -> Bool {
+    ["AXFolderDockItem", "AXTrashDockItem", "AXDocumentDockItem",
+     "AXMinimizedWindowDockItem", "AXURLDockItem"].contains(subrole)
+}
+
+func dockSwitchHint(appID: String, appName: String) -> Hint {
+    Hint(appID: appID, appName: appName, title: dockSwitchTitle, shortcut: dockSwitchShortcut, source: "dock")
+}
+
+// Compare file URLs in memory. The path is never logged or written.
+func standardizedAppPath(_ raw: String) -> String? {
+    let url: URL
+    if raw.hasPrefix("file:") {
+        guard let parsed = URL(string: raw), parsed.isFileURL else { return nil }
+        url = parsed
+    } else if raw.hasPrefix("/") {
+        url = URL(fileURLWithPath: raw)
+    } else {
+        return nil
+    }
+    var path = url.standardizedFileURL.path
+    while path.hasSuffix("/") { path.removeLast() }
+    guard path.lowercased().hasSuffix(".app") else { return nil }
+    return path.lowercased()
+}
+
+func matchingRunningBundleID(dockURLString: String?, running: [DockRunningApp]) -> String? {
+    guard let dockURLString, let dock = standardizedAppPath(dockURLString) else { return nil }
+    let matches = running.compactMap { app -> String? in
+        guard let url = standardizedAppPath(app.urlString), url == dock else { return nil }
+        return app.bundleID
+    }
+    let unique = Set(matches.filter { !$0.isEmpty && !isDockBundleID($0) })
+    guard unique.count == 1 else { return nil }
+    return unique.first
+}
+
+func dockSwitchDecision(click: DockClickSample, activation: DockActivationSample,
+                        lastHintAt: Date?, settings: DockSwitchSettings = .standard) -> DockSwitchVerdict {
+    guard settings.enabled else { return .ignore }
+    guard !click.hasModifier, !activation.viaKeyboard else { return .ignore }
+    guard isDockBundleID(click.hostBundleID) else { return .ignore }
+    guard isDockApplicationItem(role: click.role, subrole: click.subrole) else { return .ignore }
+    guard let target = click.targetBundleID, !target.isEmpty, !isShortcupBundleID(target) else { return .ignore }
+    guard click.runningContainsTarget else { return .ignore }
+    guard target != click.frontmostBundleID else { return .ignore }
+    guard activation.bundleID == target else { return .ignore }
+    guard abs(activation.at.timeIntervalSince(click.at)) <= settings.correlationWindow else { return .ignore }
+    if let last = lastHintAt {
+        let sinceHint = min(abs(activation.at.timeIntervalSince(last)), abs(click.at.timeIntervalSince(last)))
+        if sinceHint < settings.cooldown { return .ignore }
+    }
+    return .show
+}
+
+struct DockSwitchCorrelator: Equatable {
+    var settings: DockSwitchSettings = .standard
+    var pendingClick: DockClickSample?
+    var pendingActivation: DockActivationSample?
+    var lastHintAt: Date?
+
+    mutating func noteClick(_ click: DockClickSample, now: Date) -> Hint? {
+        expire(now: now)
+        pendingClick = click
+        return match(now: now)
+    }
+
+    mutating func noteActivation(_ activation: DockActivationSample, now: Date) -> Hint? {
+        expire(now: now)
+        pendingActivation = activation
+        return match(now: now)
+    }
+
+    mutating func cancelClick() { pendingClick = nil }
+
+    mutating func expire(now: Date) {
+        if let click = pendingClick, now.timeIntervalSince(click.at) > settings.correlationWindow {
+            pendingClick = nil
+        }
+        if let act = pendingActivation, now.timeIntervalSince(act.at) > settings.correlationWindow {
+            pendingActivation = nil
+        }
+    }
+
+    private mutating func match(now: Date) -> Hint? {
+        guard let click = pendingClick, let act = pendingActivation else { return nil }
+        guard dockSwitchDecision(click: click, activation: act, lastHintAt: lastHintAt, settings: settings) == .show else {
+            return nil
+        }
+        pendingClick = nil
+        pendingActivation = nil
+        lastHintAt = now
+        return dockSwitchHint(appID: act.bundleID, appName: act.appName)
+    }
+}
+
 struct HintHistory {
     private(set) var hints: [Hint] = []
     mutating func add(_ hint: Hint) {
