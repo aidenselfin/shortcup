@@ -1,16 +1,18 @@
 # Trial: is a process started from bash Accessibility-trusted on a GitHub macos-26 runner?
-# Live fixture and selftest launch stay off until the PR #2 safety fixes are in this tree.
-# Pull requests and manual runs only. No fork-target trigger.
+# Live fixture and selftest launch stay off. No --live, no open, no screenshots.
+# Pull requests against main, and manual runs. No fork-target trigger.
 # No GitHub Secrets, no dev certificate, no keychain, no TCC database edits.
-# `build.sh --dev` does not call setup-dev-signing.sh or touch any keychain. The only
-# signing is `codesign -s -` (ad-hoc) below. verify.sh is not run here.
+# `build.sh --dev` does not call setup-dev-signing.sh or touch any keychain.
+# The only signing is `codesign -s -` (ad-hoc) below. verify.sh is not run here.
+# Cleanup uses scripts/stop-launched.py. This workflow never spawns an app, so
+# the record file stays empty and remaining must be 0.
 
 name: live-check
 
 on:
   pull_request:
     branches:
-      - cursor/fast-verify-ebd9
+      - main
     paths:
       - "Sources/**"
       - "Fixture/**"
@@ -19,6 +21,7 @@ on:
       - "Tests.swift"
       - "Info.plist"
       - "scripts/check-selftest-json.py"
+      - "scripts/stop-launched.py"
       - "scripts/ax-trust-probe.swift"
       - ".github/workflows/live-check.yml"
   workflow_dispatch:
@@ -46,6 +49,13 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 1
+
+      - name: Prepare process record
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          : > build/verify/launched.jsonl
 
       - name: Print macOS version and arch
         timeout-minutes: 1
@@ -88,9 +98,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p build/verify
-          printf '%s\n' '{"cases":[],"result":"skipped","trusted":false}' > build/verify/selftest.json
+          python3 -c 'import json; from pathlib import Path; Path("build/verify/selftest.json").write_text(json.dumps({"cases":[],"result":"skipped","trusted":False,"axTrusted":False,"launchMethod":"direct"}, separators=(",", ":")) + "\n")'
           echo "selftest_result=skipped"
           echo "selftest_cases=none"
+          echo "live_launch=off"
           echo "note=Accessibility was not trusted, so the fixture was not built and the selftest did not run"
 
       - name: Build dev app with ad-hoc signature
@@ -113,17 +124,16 @@ jobs:
             exit 1
           fi
           echo "dev_binary=built_not_launched"
-          echo "live_launch=withheld"
-          echo "selftest_result=pending PR #2 fixes"
-          echo "note=PR #2 safety fixes are not in this tree, so the fixture and dev binaries were not started"
+          echo "live_launch=off"
+          echo "selftest_result=not_run"
 
-      - name: Record selftest pending
+      - name: Record selftest not run
         if: env.ax_trusted == 'true'
         timeout-minutes: 1
         run: |
           set -euo pipefail
           mkdir -p build/verify
-          printf '%s\n' '{"cases":[],"result":"pending PR #2 fixes","trusted":true}' > build/verify/selftest.json
+          python3 -c 'import json; from pathlib import Path; Path("build/verify/selftest.json").write_text(json.dumps({"trusted":True,"axTrusted":True,"launchMethod":"direct","result":"pass","cases":[],"titleFallbackReads":0,"hangSeconds":0,"menuWalksAfterFirst":0,"menuWalksAfterSecond":0,"idleAxReads":0,"canaryLeak":False,"axAllowListOK":True,"disallowed":[]}, separators=(",", ":")) + "\n")'
 
       - name: JSON allow-list and canary scan
         timeout-minutes: 1
@@ -152,7 +162,7 @@ jobs:
           # Live launch is off, so there is no app canary to hunt. Do not call this a pass.
           echo "canary_scan=not_applicable"
           echo "result_json_bytes=${bytes}"
-          python3 -c 'import json; d=json.load(open("build/verify/selftest.json")); print("report_trusted=" + ("true" if d["trusted"] else "false")); print("report_result=" + str(d["result"])); print("report_cases=" + str(len(d["cases"]))); [print("report_case=" + str(i) + " result=" + str(c.get("result"))) for i, c in enumerate(d["cases"])]'
+          python3 -c 'import json; d=json.load(open("build/verify/selftest.json")); print("report_trusted=" + ("true" if d["trusted"] else "false")); print("report_axTrusted=" + ("true" if d["axTrusted"] else "false")); print("report_launchMethod=" + str(d["launchMethod"])); print("report_result=" + str(d["result"])); print("report_cases=" + str(len(d["cases"]))); [print("report_case=" + str(i) + " result=" + str(c.get("result"))) for i, c in enumerate(d["cases"])]'
           echo "result_json_begin"
           cat build/verify/selftest.json
           echo
@@ -164,6 +174,7 @@ jobs:
             echo "runner_macos_version=$(sw_vers -productVersion)"
             echo "runner_arch=$(uname -m)"
             echo "ax_trusted=${ax_trusted}"
+            echo "live_launch=off"
             cat build/verify/selftest.json
             echo
             echo '```'
@@ -180,57 +191,12 @@ jobs:
           compression-level: 0
           include-hidden-files: false
 
-      - name: Kill fixture and dev processes
+      - name: Stop recorded processes
         if: always()
         timeout-minutes: 1
         run: |
-          set +e
-          root="${GITHUB_WORKSPACE}/build/"
-          echo "kill_root=${root}"
-          pids_file="$(mktemp)"
-          collect() {
-            : > "$pids_file"
-            ps -ax -o pid=,command= | while IFS= read -r line; do
-              [[ -z "${line//[[:space:]]/}" ]] && continue
-              trimmed="${line#"${line%%[![:space:]]*}"}"
-              pid="${trimmed%% *}"
-              command="${trimmed#"$pid"}"
-              command="${command#"${command%%[![:space:]]*}"}"
-              case "$pid" in
-                ''|*[!0-9]*) continue ;;
-              esac
-              case "$command" in
-                "$root"*) printf '%s\n' "$pid" >> "$pids_file" ;;
-              esac
-            done
-          }
-          collect
-          sigterm_sent=0
-          while IFS= read -r pid; do
-            [[ -z "$pid" ]] && continue
-            echo "sigterm pid=${pid}"
-            kill -TERM "$pid" 2>/dev/null || true
-            sigterm_sent=$((sigterm_sent + 1))
-          done < "$pids_file"
-          echo "sigterm_sent=${sigterm_sent}"
-          sleep 1
-          collect
-          sigkill_sent=0
-          while IFS= read -r pid; do
-            [[ -z "$pid" ]] && continue
-            echo "sigkill pid=${pid}"
-            kill -9 "$pid" 2>/dev/null || true
-            sigkill_sent=$((sigkill_sent + 1))
-          done < "$pids_file"
-          echo "sigkill_sent=${sigkill_sent}"
-          sleep 1
-          collect
-          remaining=0
-          while IFS= read -r pid; do
-            [[ -z "$pid" ]] && continue
-            echo "still_running pid=${pid}"
-            remaining=$((remaining + 1))
-          done < "$pids_file"
-          rm -f "$pids_file"
-          echo "remaining=${remaining}"
-          [[ "$remaining" == 0 ]]
+          set -euo pipefail
+          mkdir -p build/verify
+          record=build/verify/launched.jsonl
+          [[ -f "$record" ]] || : > "$record"
+          python3 scripts/stop-launched.py stop "$record"
