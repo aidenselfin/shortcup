@@ -1,0 +1,163 @@
+title = "shortcup privacy scan"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "keychain-password-file"
+description = "keychain password file"
+path = '''(?:^|/)keychain-password$'''
+
+[[rules]]
+id = "forbidden-filename"
+description = "signing, keychain, environment, or Xcode user files"
+path = '''(?i)(?:\.(?:p12|pem|key|cer|p8|pfx|mobileprovision|provisionprofile|keychain|keychain-db|certsigningrequest)$|(?:^|/)\.env(?:\..*)?$|(?:^|/)xcuserdata/|(?:^|/)\.config/shortcup/|(?:^|/)validation-(?:events|state|results)[^/]*$|(?:^|/)validation-fixtures/)'''
+
+# Home directories in any spelling: slash or backslash, JSON-escaped, any letter case,
+# and non-ASCII names. Dot and dot-dot segments are folded before the username is
+# checked, so they cannot hide a personal home path behind Shared or runner.
+# Only runner and Shared are allowed as that username. The secret group leaves out
+# the leading slash so the default config's allowlist for plain Unix paths never applies.
+[[rules]]
+id = "macos-user-path"
+description = "home directory other than runner or Shared"
+regex = '''(?i)[/\\]+(users(?:[/\\]+[^\s/\\"'<>:;,|(){}*$?=&#%!@+~\x60\[]+)+)'''
+secretGroup = 1
+keywords = ["users"]
+
+[[rules.allowlists]]
+regexTarget = "match"
+regexes = [
+  '''(?i)[/\\]+users(?:[/\\]+\.)*[/\\]+(?:runner|shared)(?:[/\\]+(?:\.|[.][^./\\][^/\\]*|[^.][^/\\]*))*$''',
+  '''(?i)[/\\]+users(?:[/\\]+\.)+$''',
+]
+
+[[rules]]
+id = "home-path"
+description = "Linux home directory other than runner"
+regex = '''(?i)[/\\]+(home(?:[/\\]+[^\s/\\"'<>:;,|(){}*$?=&#%!@+~\x60\[]+)+)'''
+secretGroup = 1
+keywords = ["home"]
+
+[[rules.allowlists]]
+regexTarget = "match"
+regexes = [
+  '''(?i)[/\\]+home(?:[/\\]+\.)*[/\\]+runner(?:[/\\]+(?:\.|[.][^./\\][^/\\]*|[^.][^/\\]*))*$''',
+  '''(?i)[/\\]+home(?:[/\\]+\.)+$''',
+]
+
+[[rules]]
+id = "owner-device"
+description = "owner name followed by a device name"
+regex = '''(?:의|'s|’s) (?:Mac|MacBook|iMac|iPhone|iPad)'''
+keywords = ["mac", "iphone", "ipad"]
+
+[[rules]]
+id = "host-device"
+description = "default macOS host name with a person-like prefix"
+regex = '''(?i)[A-Za-z0-9]+-(?:MacBook|iMac|Mac-mini|Mac-Studio|Mac-Pro|iPhone|iPad)(?:-Pro|-Air)?(?:\.local)?'''
+keywords = ["macbook", "imac", "mac-mini", "mac-studio", "mac-pro", "iphone", "ipad"]
+
+# Fixture lines: one intended rule per marked line, applied in privacy-check.sh.
+# PR-only: remove after squash merge.
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["private-key"]
+commits = [
+  "ac3d859d4547d96dc01d43f6819144be7fce7496",
+  "f09b7d309a9461e0d6a0c2220be817199f96a258",
+]
+paths = ['''^scripts/privacy-check-selftest\.sh$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["macos-user-path"]
+commits = [
+  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
+  "2542ec18fff050c167074836f8120369f5cd28d0",
+]
+paths = ['''^scripts/privacy-fixtures/fake-user-path\.txt$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["github-pat"]
+commits = [
+  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
+  "2542ec18fff050c167074836f8120369f5cd28d0",
+]
+paths = ['''^scripts/privacy-fixtures/fake-github-token\.txt$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["private-key"]
+commits = [
+  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
+  "2542ec18fff050c167074836f8120369f5cd28d0",
+]
+paths = ['''^scripts/privacy-fixtures/fake-private-key\.txt$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["keychain-password-file"]
+commits = [
+  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
+  "2542ec18fff050c167074836f8120369f5cd28d0",
+]
+paths = ['''^scripts/privacy-fixtures/keychain-password$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["macos-user-path"]
+commits = ["94d496732e60e1551155b01aea4ec3ca5b2b2d04"]
+paths = ['''^scripts/privacy-fixtures/macos-user-path\.toml$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["macos-user-path"]
+commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
+paths = ['''^scripts/privacy-check-selftest\.sh$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["owner-device"]
+commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
+paths = ['''^scripts/privacy-check-selftest\.sh$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["macos-user-path"]
+commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
+paths = ['''^\.gitleaks\.toml$''']
+
+# PR-only: remove after PR #2 squash merge
+[[allowlists]]
+description = "PR-only: remove after PR #2 squash merge"
+targetRules = ["owner-device"]
+commits = ["c5e8e8b546bd72ae9211f84afb922d09c72cbc48"]
+paths = ['''^verify\.sh$''']
+
+[[allowlists]]
+description = "PR-only: remove after squash merge"
+targetRules = ["macos-user-path"]
+commits = ["e2798d69b9651918b17251778b9ca4a9526ccb0c"]
+paths = [
+  '''^\.gitleaks\.toml$''',
+  '''^scripts/privacy-check-selftest\.sh$''',
+]
+
+# Public history from before this check. Pinned to commit and rule.
+[[allowlists]]
+description = "historical home paths"
+targetRules = ["macos-user-path"]
+commits = [
+  "d8001e780038c391f69367999cc41cbe9336dafa",
+  "6ef593ad25b96559b67dde593ffc5bd978689d16",
+]
+
+[[allowlists]]
+description = "historical device phrase"
+targetRules = ["owner-device"]
+commits = [
+  "ae5c13d06ac9670c96955ece48257abdf88b9e84",
+  "f7c8745f7cc94f03a33b3df5167a1f76ee8dcfa1",
+]

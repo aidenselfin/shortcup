@@ -1,0 +1,7 @@
+# Changes to the privacy scan need the owner's review.
+/scripts/privacy* @aidenselfin
+/scripts/privacy-binary-allowlist.txt @aidenselfin
+/scripts/install-pre-push-hook.sh @aidenselfin
+/.gitleaks.toml @aidenselfin
+/.github/workflows/ @aidenselfin
+/.github/CODEOWNERS @aidenselfin

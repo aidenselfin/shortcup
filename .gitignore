@@ -1,2 +1,17 @@
 build/
 .DS_Store
+keychain-password
+*.keychain
+*.keychain-db
+*.p12
+*.p8
+*.pfx
+*.pem
+*.key
+*.cer
+*.certSigningRequest
+*.mobileprovision
+*.provisionprofile
+xcuserdata/
+.env
+.env.*
