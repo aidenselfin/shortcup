@@ -2,10 +2,28 @@
 set -eu
 setopt NO_BARE_GLOB_QUAL
 cd "${0:A:h}"
-mode="${1:-product}"
+sign=1
+mode="${1:-}"
+case "$mode" in
+  "") mode=product ;;
+  --no-sign)
+    mode=product
+    sign=0
+    ;;
+  --checks-only | --dev | --fixture) ;;
+  *)
+    print -- "usage: zsh build.sh [--no-sign | --checks-only | --dev | --fixture]" >&2
+    exit 2
+    ;;
+esac
 /bin/mkdir -p build/module-cache
+typeset -F SECONDS
+unit_started=$SECONDS
 /usr/bin/swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
 ./build/checks
+if [[ "$mode" == "product" ]]; then
+  printf 'unit-tests-seconds: %.3f\n' $((SECONDS - unit_started))
+fi
 if [[ "$mode" == "--checks-only" ]]; then
   print "Checks passed"
   exit 0
@@ -57,12 +75,16 @@ EOF
   exit 0
 fi
 /bin/mkdir -p build/Shortcup.app/Contents/MacOS
+app_started=$SECONDS
 /usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
 minos="$(/usr/bin/vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | /usr/bin/python3 scripts/vtool-minos.py)"
 [[ -n "$minos" ]]
 # Keep the checked-in plist in sync with the binary before copying it into the bundle.
 /usr/libexec/PlistBuddy -c "Set :LSMinimumSystemVersion $minos" Info.plist
 /bin/cp Info.plist build/Shortcup.app/Contents/Info.plist
-/usr/bin/codesign --force --sign - --identifier com.shortcup.app build/Shortcup.app
+if [[ "$sign" == 1 ]]; then
+  /usr/bin/codesign --force --sign - --identifier com.shortcup.app build/Shortcup.app
+fi
 /usr/bin/touch build/Shortcup.app
+printf 'app-build-seconds: %.3f\n' $((SECONDS - app_started))
 print "Built: $PWD/build/Shortcup.app"
