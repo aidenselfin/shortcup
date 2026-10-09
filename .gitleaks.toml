@@ -59,91 +59,12 @@ regex = '''(?i)[A-Za-z0-9]+-(?:MacBook|iMac|Mac-mini|Mac-Studio|Mac-Pro|iPhone|i
 keywords = ["macbook", "imac", "mac-mini", "mac-studio", "mac-pro", "iphone", "ipad"]
 
 # Fixture lines: one intended rule per marked line, applied in privacy-check.sh.
-# PR-only: remove after squash merge.
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["private-key"]
-commits = [
-  "ac3d859d4547d96dc01d43f6819144be7fce7496",
-  "f09b7d309a9461e0d6a0c2220be817199f96a258",
-]
-paths = ['''^scripts/privacy-check-selftest\.sh$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["macos-user-path"]
-commits = [
-  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
-  "2542ec18fff050c167074836f8120369f5cd28d0",
-]
-paths = ['''^scripts/privacy-fixtures/fake-user-path\.txt$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["github-pat"]
-commits = [
-  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
-  "2542ec18fff050c167074836f8120369f5cd28d0",
-]
-paths = ['''^scripts/privacy-fixtures/fake-github-token\.txt$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["private-key"]
-commits = [
-  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
-  "2542ec18fff050c167074836f8120369f5cd28d0",
-]
-paths = ['''^scripts/privacy-fixtures/fake-private-key\.txt$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["keychain-password-file"]
-commits = [
-  "94d496732e60e1551155b01aea4ec3ca5b2b2d04",
-  "2542ec18fff050c167074836f8120369f5cd28d0",
-]
-paths = ['''^scripts/privacy-fixtures/keychain-password$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["macos-user-path"]
-commits = ["94d496732e60e1551155b01aea4ec3ca5b2b2d04"]
-paths = ['''^scripts/privacy-fixtures/macos-user-path\.toml$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["macos-user-path"]
-commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
-paths = ['''^scripts/privacy-check-selftest\.sh$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["owner-device"]
-commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
-paths = ['''^scripts/privacy-check-selftest\.sh$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["macos-user-path"]
-commits = ["e02dcd713c1e20ce619e5961da4a585dd918d36b"]
-paths = ['''^\.gitleaks\.toml$''']
-
 # PR-only: remove after PR #2 squash merge
 [[allowlists]]
 description = "PR-only: remove after PR #2 squash merge"
 targetRules = ["owner-device"]
 commits = ["c5e8e8b546bd72ae9211f84afb922d09c72cbc48"]
 paths = ['''^verify\.sh$''']
-
-[[allowlists]]
-description = "PR-only: remove after squash merge"
-targetRules = ["macos-user-path"]
-commits = ["e2798d69b9651918b17251778b9ca4a9526ccb0c"]
-paths = [
-  '''^\.gitleaks\.toml$''',
-  '''^scripts/privacy-check-selftest\.sh$''',
-]
 
 # Public history from before this check. Pinned to commit and rule.
 [[allowlists]]
