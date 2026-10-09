@@ -257,11 +257,11 @@ private func runDockSwitchChecks() {
                               activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
     assert(dockSwitchDecision(click: dockClick(at: t0),
                               activation: dockActivation(keyboard: true, at: soon), lastHintAt: nil) == .ignore)
-    assert(dockSwitchDecision(click: dockClick(subrole: "AXFolderDockItem", target: "com.apple.finder", at: t0),
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.finder", subrole: "AXFolderDockItem", at: t0),
                               activation: dockActivation(id: "com.apple.finder", at: soon), lastHintAt: nil) == .ignore)
-    assert(dockSwitchDecision(click: dockClick(subrole: "AXTrashDockItem", target: "com.apple.finder", at: t0),
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.finder", subrole: "AXTrashDockItem", at: t0),
                               activation: dockActivation(id: "com.apple.finder", at: soon), lastHintAt: nil) == .ignore)
-    assert(dockSwitchDecision(click: dockClick(subrole: "AXDocumentDockItem", target: "com.apple.Safari", at: t0),
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.Safari", subrole: "AXDocumentDockItem", at: t0),
                               activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
     assert(dockSwitchDecision(click: dockClick(front: "com.apple.Safari", at: t0),
                               activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
