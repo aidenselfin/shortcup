@@ -35,6 +35,7 @@ SAMPLE = 0.2
 WATCH_DEADLINE = 9 * 60
 SELF_CHECK_SHORT = 2.0
 SELF_CHECK_SHORT_ESLOGGER = 5.0
+ES_BUF_CAP = 1024 * 1024
 
 
 def repo_root():
@@ -288,15 +289,21 @@ def _start_eslogger_pty(argv):
 
         def terminate(self):
             try:
-                os.kill(self.pid, signal.SIGTERM)
+                os.killpg(self.pid, signal.SIGTERM)
             except OSError:
-                pass
+                try:
+                    os.kill(self.pid, signal.SIGTERM)
+                except OSError:
+                    pass
 
         def kill(self):
             try:
-                os.kill(self.pid, signal.SIGKILL)
+                os.killpg(self.pid, signal.SIGKILL)
             except OSError:
-                pass
+                try:
+                    os.kill(self.pid, signal.SIGKILL)
+                except OSError:
+                    pass
 
         def wait(self, timeout=None):
             deadline = time.monotonic() + (timeout if timeout is not None else 1e9)
@@ -320,7 +327,7 @@ def start_eslogger():
         ["exec", "fork", "posix_spawn"],
     )
     for events in event_sets:
-        argv = ["sudo", "-n", eslogger, *events]
+        argv = ["/usr/bin/sudo", "-n", eslogger, *events]
         proc = _start_eslogger_pipe(argv)
         if proc is None:
             proc = _start_eslogger_pty(argv)
@@ -328,6 +335,32 @@ def start_eslogger():
             proc._es_events = ",".join(events)
             return proc
     return None
+
+
+def utf8_split(buf):
+    """Decode a complete UTF-8 prefix. Keep an incomplete trailing sequence as bytes."""
+    if not buf:
+        return "", b""
+    try:
+        return buf.decode("utf-8"), b""
+    except UnicodeDecodeError as exc:
+        if exc.start > 0:
+            prefix = buf[: exc.start].decode("utf-8")
+        else:
+            prefix = ""
+        return prefix, buf[exc.start :]
+
+
+def json_truncated(exc, rest):
+    """True when rest looks like an incomplete JSON value, not a finished bad line."""
+    if not rest:
+        return True
+    nl = rest.find("\n")
+    if nl != -1 and 0 <= exc.pos <= nl:
+        return False
+    if nl == -1:
+        return True
+    return exc.pos >= len(rest.rstrip())
 
 
 def eslogger_hits(proc, verify_pid, ignore_pids, lib):
@@ -357,11 +390,9 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
             break
         buf += chunk
         proc._es_bytes = getattr(proc, "_es_bytes", 0) + len(chunk)
-    if b"dummy-true" in buf:
-        proc._es_raw_dummy = True
-    if b"/build/" in buf or b"watch-dummy" in buf:
-        proc._es_has_build = True
-    text = buf.decode("utf-8", "replace")
+        if len(buf) > ES_BUF_CAP:
+            raise RuntimeError("eslogger buffer cap")
+    text, remainder = utf8_split(buf)
     decoder = json.JSONDecoder()
     index = 0
     while index < len(text):
@@ -371,8 +402,16 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
             break
         try:
             data, end = decoder.raw_decode(text, index)
-        except json.JSONDecodeError:
-            break
+        except json.JSONDecodeError as exc:
+            rest = text[index:]
+            if json_truncated(exc, rest):
+                break
+            nl = rest.find("\n")
+            if nl == -1:
+                break
+            index = index + nl + 1
+            proc._es_corrupt = getattr(proc, "_es_corrupt", 0) + 1
+            continue
         index = end
         proc._es_json = getattr(proc, "_es_json", 0) + 1
         for raw in exec_paths(data):
@@ -383,7 +422,9 @@ def eslogger_hits(proc, verify_pid, ignore_pids, lib):
             reason = forbidden_reason(lib, 0, path, verify_pid, allow_checks=True)
             if reason:
                 hits.append((0, path, reason))
-    proc._es_buf = text[index:].encode("utf-8", "replace")
+    proc._es_buf = text[index:].encode("utf-8") + remainder
+    if len(proc._es_buf) > ES_BUF_CAP:
+        raise RuntimeError("eslogger buffer cap")
     if proc.poll() is not None:
         raise RuntimeError("eslogger exited")
     return hits
@@ -443,7 +484,6 @@ def self_check_short(lib, ignore_pids, require_eslogger):
             return False
     loop = subprocess.Popen(["/bin/zsh", "-c", "while true; do " + str(dummy) + "; done"])
     seen_eslogger_json = False
-    seen_eslogger_raw = False
     seen_polling = False
     try:
         wait_s = SELF_CHECK_SHORT_ESLOGGER if require_eslogger else SELF_CHECK_SHORT
@@ -452,15 +492,13 @@ def self_check_short(lib, ignore_pids, require_eslogger):
             if es_proc is not None:
                 try:
                     for _pid, path, reason in eslogger_hits(es_proc, loop.pid, ignore_pids, lib):
-                        if reason == "executable under build/" and "dummy-true" in str(path):
+                        if reason == "executable under build/" and path is not None and path.name == "dummy-true":
                             seen_eslogger_json = True
                             break
-                    if getattr(es_proc, "_es_raw_dummy", False):
-                        seen_eslogger_raw = True
-                except RuntimeError:
+                except RuntimeError as exc:
                     es_proc = None
                     if require_eslogger:
-                        print("FAIL: eslogger exited during the short-lived self-test", file=sys.stderr)
+                        print("FAIL: " + str(exc), file=sys.stderr)
                         return False
             for pid, path, reason in sample_hits(lib, ignore_pids | {loop.pid}, loop.pid):
                 if reason == "executable under build/" and path is not None and path.name == "dummy-true":
@@ -473,18 +511,15 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 ):
                     seen_polling = True
                     break
-            if require_eslogger and (seen_eslogger_json or seen_eslogger_raw):
+            if require_eslogger and seen_eslogger_json:
                 break
-            if not require_eslogger and (seen_eslogger_json or seen_eslogger_raw or seen_polling):
+            if not require_eslogger and (seen_eslogger_json or seen_polling):
                 break
             time.sleep(0.02)
         if require_eslogger:
-            if seen_eslogger_json or seen_eslogger_raw:
-                path_name = "eslogger json" if seen_eslogger_json else "eslogger raw"
+            if seen_eslogger_json:
                 print(
-                    "PASS: process watcher "
-                    + path_name
-                    + " detected a short-lived executable under build/",
+                    "PASS: process watcher eslogger json detected a short-lived executable under build/",
                     flush=True,
                 )
                 return True
@@ -494,22 +529,15 @@ def self_check_short(lib, ignore_pids, require_eslogger):
                 + str(getattr(es_proc, "_es_bytes", 0) if es_proc is not None else 0)
                 + " json="
                 + str(getattr(es_proc, "_es_json", 0) if es_proc is not None else 0)
-                + " raw_dummy="
-                + ("1" if es_proc is not None and getattr(es_proc, "_es_raw_dummy", False) else "0")
-                + " has_build="
-                + ("1" if es_proc is not None and getattr(es_proc, "_es_has_build", False) else "0")
+                + " corrupt="
+                + str(getattr(es_proc, "_es_corrupt", 0) if es_proc is not None else 0)
                 + " events="
                 + str(getattr(es_proc, "_es_events", "-") if es_proc is not None else "-"),
                 file=sys.stderr,
             )
             return False
-        if seen_eslogger_json or seen_eslogger_raw or seen_polling:
-            if seen_eslogger_json:
-                path_name = "eslogger json"
-            elif seen_eslogger_raw:
-                path_name = "eslogger raw"
-            else:
-                path_name = "polling"
+        if seen_eslogger_json or seen_polling:
+            path_name = "eslogger json" if seen_eslogger_json else "polling"
             print(
                 "PASS: process watcher "
                 + path_name
@@ -536,17 +564,57 @@ def self_check_short(lib, ignore_pids, require_eslogger):
             pass
 
 
+def leftover_group(pgid, ignore=()):
+    leftover = []
+    try:
+        lib = libproc()
+        pids = all_pids(lib)
+    except (OSError, RuntimeError):
+        return leftover
+    for pid in pids:
+        if pid in ignore:
+            continue
+        try:
+            if os.getpgid(pid) != pgid:
+                continue
+        except OSError:
+            continue
+        info = bsdinfo(lib, pid)
+        if info is not None and info.get("state") == SZOMB:
+            continue
+        leftover.append(pid)
+    return leftover
+
+
 def kill_proc(proc):
+    """TERM then KILL the process group. Return leftover pids, or empty."""
     if proc is None:
-        return
+        return []
     fd = getattr(proc, "_es_fd", None)
     close_fd = getattr(proc, "stdout", None) is proc
+    pgid = None
+    try:
+        pgid = os.getpgid(proc.pid)
+    except OSError:
+        pgid = proc.pid
     if proc.poll() is None:
-        proc.terminate()
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except OSError:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
         try:
             proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
             try:
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
@@ -556,6 +624,9 @@ def kill_proc(proc):
             os.close(fd)
         except OSError:
             pass
+    if pgid is None:
+        return []
+    return leftover_group(pgid, ignore={proc.pid})
 
 
 def run_watched(command):
@@ -576,9 +647,10 @@ def run_watched(command):
     es_proc = None
     hits = []
     error = None
+    leftover = []
     deadline = time.monotonic() + WATCH_DEADLINE
     try:
-        proc = subprocess.Popen(command)
+        proc = subprocess.Popen(command, start_new_session=True)
         ignore = me | {proc.pid}
         if require_es:
             es_proc = start_eslogger()
@@ -608,8 +680,12 @@ def run_watched(command):
     except Exception as exc:
         error = exc
     finally:
-        kill_proc(es_proc)
-        kill_proc(proc)
+        leftover.extend(kill_proc(es_proc))
+        leftover.extend(kill_proc(proc))
+    leftover = [pid for pid in leftover if pid]
+    if leftover:
+        print("FAIL: process watcher leftovers=" + str(len(set(leftover))), file=sys.stderr)
+        return 1
     if error is not None:
         print("FAIL: process watcher error: " + str(error), file=sys.stderr)
         return 1

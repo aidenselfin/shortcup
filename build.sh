@@ -1,5 +1,6 @@
 #!/bin/zsh
 set -eu
+setopt NO_BARE_GLOB_QUAL
 cd "${0:A:h}"
 mode="${1:-product}"
 /bin/mkdir -p build/module-cache

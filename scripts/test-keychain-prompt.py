@@ -53,6 +53,7 @@ FAIL = [
     b"password to unlock " + KC.encode(),
     b"(deprecated) error: bad password for item:",
     b"(deprecated) please enter the password:",
+    b"[?1034hpassword:",
 ]
 
 
@@ -66,10 +67,26 @@ def main():
         got = match(line, KC)
         if got is not None:
             failures.append(f"expected none for {line!r}, got {got!r}")
+    tmp = pathlib.Path("/tmp/shortcup-prompt-realpath")
+    tmp.mkdir(exist_ok=True)
+    link = tmp / "link.keychain-db"
+    try:
+        if link.exists() or link.is_symlink():
+            link.unlink()
+        os.symlink(KC, link)
+        real = os.path.realpath(str(link))
+        got = match(b"password to unlock " + real.encode() + b":", str(link))
+        if got != "password to unlock %s:":
+            failures.append("realpath prompt got " + repr(got))
+    finally:
+        try:
+            link.unlink()
+        except OSError:
+            pass
     if failures:
         print("\n".join(failures))
         return 1
-    print(f"PASS: keychain prompt cases ({len(PASS) + len(FAIL)})")
+    print(f"PASS: keychain prompt cases ({len(PASS) + len(FAIL) + 1})")
     return 0
 
 

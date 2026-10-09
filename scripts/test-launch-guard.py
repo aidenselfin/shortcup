@@ -41,6 +41,10 @@ BYPASS = [
     ("GIT_CONFIG=/tmp/x /usr/bin/git ls-files", "GIT_CONFIG"),
     ("export GIT_CONFIG_COUNT=1", "GIT_CONFIG_"),
     ("RIPGREP_CONFIG_PATH=/tmp/rgrc /opt/homebrew/bin/rg .", "RIPGREP_CONFIG_PATH"),
+    ('"RIPGREP_CONFIG_PATH"=/tmp/rgrc /opt/homebrew/bin/rg .', "RIPGREP_CONFIG_PATH"),
+    ("export RIPGREP_CONFIG_PATH=/tmp/rgrc", "RIPGREP_CONFIG_PATH"),
+    ("export RIPGREP_CONFIG_PATH", "RIPGREP_CONFIG_PATH"),
+    ("ls *(#qN)", "glob qualifier (#q"),
     ("x=\"${(e)foo}\"", "zsh parameter-expansion flags"),
     ("ls *(e:id:)", "glob qualifier (e:"),
     ("ls *(+foo)", "glob qualifier (+"),
@@ -91,6 +95,7 @@ ACCEPTED = [
     "/bin/zsh -f build.sh --checks-only\n",
     "trap '/bin/rm -rf \"$work\"' EXIT\n",
     "if [[ \"$live\" == 1 ]]; then\n  /bin/zsh -f \"$ROOT/scripts/verify-live.sh\" \"$@\"\nfi\n",
+    "setopt NO_BARE_GLOB_QUAL\n",
     "# if [[ \"$live\" == 1 ]]; then\nprint -- ok\n# fi\n",
 ]
 

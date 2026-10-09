@@ -3,6 +3,7 @@
 # Dedicated keychain only (not the login keychain). No TCC changes.
 # Trust settings are not required to sign. Re-running is safe.
 set -eu
+setopt NO_BARE_GLOB_QUAL
 NAME="Shortcup Dev"
 CONF_DIR="${HOME}/.config/shortcup"
 PW_FILE="${CONF_DIR}/keychain-password"

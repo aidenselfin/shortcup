@@ -401,7 +401,7 @@ SECURITY_PROMPT_EXACT = (
 )
 # File-based keychain APIs on current macOS prefix getpass with this token.
 SECURITY_PROMPT_PREFIXES = (b"", b"(deprecated) ")
-CSI = re.compile(br"\x1b\[[?\d;]*[A-Za-z]|\x1b[@-Z\\-_]|\x1b\][^\x07]*\x07|\[\?[0-9]+[hl]")
+CSI = re.compile(br"\x1b\[[?\d;]*[A-Za-z]|\x1b[@-Z\\-_]|\x1b\][^\x07]*\x07")
 
 
 def clean_pty_text(buf):

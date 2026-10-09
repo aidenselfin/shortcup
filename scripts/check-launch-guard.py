@@ -683,7 +683,7 @@ def check_command(command, functions, *, require_abs=False, live_range=None, dep
             name = word.split("=", 1)[0].strip("\"'")
             if name.upper() == "GIT_CONFIG" or name.upper().startswith("GIT_CONFIG_"):
                 return [where + " GIT_CONFIG_"]
-            if word.startswith("RIPGREP_CONFIG_PATH="):
+            if name.upper() == "RIPGREP_CONFIG_PATH":
                 return [where + " RIPGREP_CONFIG_PATH"]
     if base == "awk" or bare == "awk":
         if not awk_has_program(words):
@@ -761,6 +761,7 @@ BANNED_SNIPPETS = (
     ("${(", "zsh parameter-expansion flags"),
     ("(e:", "glob qualifier (e:"),
     ("(+", "glob qualifier (+"),
+    ("(#q", "glob qualifier (#q"),
 )
 
 
@@ -873,6 +874,8 @@ def check_repo():
         problems.append("verify.sh has no --direct-launch switch")
     for name in SAFE_SHELL:
         text = Path(name).read_text()
+        if "setopt NO_BARE_GLOB_QUAL" not in text:
+            problems.append(name + " missing setopt NO_BARE_GLOB_QUAL")
         span = live_then_range(text) if name == "verify.sh" else None
         found, _, _, _ = check_text(text, require_abs=True, live_range=span)
         for item in found:
