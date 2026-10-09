@@ -1,0 +1,29 @@
+# Compile the app and run Tests.swift. No signing, keychain, accessibility, launch, or --live.
+
+name: build-test
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Build and unit tests
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          zsh build.sh --no-sign
