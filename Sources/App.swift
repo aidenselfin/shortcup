@@ -27,6 +27,25 @@ func axWindowShortcut(_ element: AXUIElement) -> String? {
                        modifiers: (axValue(element, kAXMenuItemCmdModifiersAttribute) as? NSNumber)?.intValue)
 }
 
+func axAllowed(_ name: String, allow: Set<String>) -> Bool { allow.contains(name) }
+func axAllowedString(_ element: AXUIElement, _ name: String, allow: Set<String>) -> String {
+    guard axAllowed(name, allow: allow) else { return "" }
+    return axString(element, name)
+}
+func axAllowedElement(_ element: AXUIElement, _ name: String, allow: Set<String>) -> AXUIElement? {
+    guard axAllowed(name, allow: allow) else { return nil }
+    return axElement(element, name)
+}
+func axAllowedURLString(_ element: AXUIElement, allow: Set<String>) -> String? {
+    guard axAllowed("AXURL", allow: allow) else { return nil }
+    guard let value = axValue(element, kAXURLAttribute) else { return nil }
+    if let url = value as? URL { return url.absoluteString }
+    return value as? String
+}
+func dockModifiersHeld(_ flags: CGEventFlags) -> Bool {
+    flags.contains(.maskCommand) || flags.contains(.maskAlternate) || flags.contains(.maskControl) || flags.contains(.maskShift)
+}
+
 func armAXTimeout() {
     let system = AXUIElementCreateSystemWide()
     AXUIElementSetMessagingTimeout(system, axMessagingTimeout)
@@ -117,6 +136,8 @@ final class ClickListener {
     private var candidate: (Hint, CGPoint)?
     private var paused = false
     private(set) var eventCount = 0
+    private var dock = DockSwitchCorrelator()
+    private var dockDown: CGPoint?
     #if SHORTCUP_DEV
     // Self-test only. A click is inspected when it is inside this rect and the hit
     // belongs to the fixture bundle and pid. CGRect.null matches nothing.
@@ -133,7 +154,9 @@ final class ClickListener {
         }
     }
 
-    func setPaused(_ value: Bool) { queue.async { self.paused = value; self.candidate = nil } }
+    func setPaused(_ value: Bool) {
+        queue.async { self.paused = value; self.candidate = nil; self.dock.cancelClick(); self.dockDown = nil }
+    }
     func start() {
         guard tap == nil, AXIsProcessTrusted() else { return }
         let mask = (CGEventMask(1) << CGEventType.leftMouseDown.rawValue) | (CGEventMask(1) << CGEventType.leftMouseUp.rawValue) | (CGEventMask(1) << CGEventType.leftMouseDragged.rawValue)
@@ -145,8 +168,10 @@ final class ClickListener {
             } else {
                 listener.eventCount += 1
                 let point = event.location
+                let flags = event.flags
+                let now = Date()
                 // Keep the event callback fast. All AX reads happen on a serial worker.
-                listener.queue.async { listener.process(type: type, point: point) }
+                listener.queue.async { listener.process(type: type, point: point, flags: flags, now: now) }
             }
             return Unmanaged.passUnretained(event)
         }
@@ -163,7 +188,16 @@ final class ClickListener {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let runSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runSource, .commonModes) }
         tap = nil; runSource = nil
-        queue.async { self.candidate = nil }
+        queue.async { self.candidate = nil; self.dock.cancelClick(); self.dockDown = nil }
+    }
+
+    func noteDockActivation(bundleID: String, appName: String, now: Date = Date()) -> Hint? {
+        var hint: Hint?
+        queue.sync {
+            // viaKeyboard stays false. Cmd+Tab is ignored because a leftover Dock click is cleared.
+            hint = self.dock.noteActivation(DockActivationSample(bundleID: bundleID, appName: appName, viaKeyboard: false, at: now), now: now)
+        }
+        return hint
     }
 
     func waitUntilIdle() { queue.sync {} }
@@ -186,7 +220,7 @@ final class ClickListener {
         return elapsed
     }
 
-    private func process(type: CGEventType, point: CGPoint) {
+    private func process(type: CGEventType, point: CGPoint, flags: CGEventFlags, now: Date) {
         #if SHORTCUP_DEV
         if let allowedRect, !allowedRect.contains(point) { return }
         if allowedBundleID != nil || allowedPID != nil {
@@ -196,17 +230,71 @@ final class ClickListener {
             if let allowedBundleID, session.world.bundleIdentifier(pid: pid) != allowedBundleID { return }
         }
         #endif
-        guard !paused else { candidate = nil; return }
+        guard !paused else { candidate = nil; dock.cancelClick(); dockDown = nil; return }
         if type == .leftMouseDown {
             candidate = nil
-            if let hint = session.inspect(at: point) { candidate = (hint, point) }
+            dock.cancelClick()
+            dockDown = nil
+            if let sample = dockClickSample(point: point, flags: flags, now: now) {
+                dockDown = point
+                if let hint = dock.noteClick(sample, now: now) {
+                    DispatchQueue.main.async { self.onHint?(hint) }
+                }
+            } else if let hint = session.inspect(at: point) {
+                candidate = (hint, point)
+            }
         } else if type == .leftMouseDragged {
             if let (_, down) = candidate, hypot(point.x - down.x, point.y - down.y) >= 8 { candidate = nil }
+            if let down = dockDown, hypot(point.x - down.x, point.y - down.y) >= 8 {
+                dock.cancelClick()
+                dockDown = nil
+            }
         } else if type == .leftMouseUp {
             defer { candidate = nil }
             guard let (hint, down) = candidate, hypot(point.x - down.x, point.y - down.y) < 8 else { return }
             DispatchQueue.main.async { self.onHint?(hint) }
         }
+    }
+
+    private func bundleID(of element: AXUIElement) -> String? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(element, &pid) == .success,
+              let runningApp = NSRunningApplication(processIdentifier: pid) else { return nil }
+        return runningApp.bundleIdentifier
+    }
+
+    // Dock process only. AXRole and AXSubrole first. AXParent and AXURL only after the owner is Dock.
+    private func dockClickSample(point: CGPoint, flags: CGEventFlags, now: Date) -> DockClickSample? {
+        let system = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(system, axMessagingTimeout)
+        var hit: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(system, Float(point.x), Float(point.y), &hit) == .success, let hit else { return nil }
+        guard let host = bundleID(of: hit), isDockBundleID(host) else { return nil }
+        AXUIElementSetMessagingTimeout(hit, axMessagingTimeout)
+        var node: AXUIElement? = hit
+        for _ in 0..<6 {
+            guard let current = node else { break }
+            guard let owner = bundleID(of: current), isDockBundleID(owner) else { return nil }
+            AXUIElementSetMessagingTimeout(current, axMessagingTimeout)
+            let role = axAllowedString(current, kAXRoleAttribute, allow: axDockReadAllowList)
+            let subrole = axAllowedString(current, kAXSubroleAttribute, allow: axDockReadAllowList)
+            if isDockItemRole(role) {
+                guard allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: owner) else { return nil }
+                let url = axAllowedURLString(current, allow: axDockReadAllowList)
+                let running = NSWorkspace.shared.runningApplications.compactMap { app -> DockRunningApp? in
+                    guard let id = app.bundleIdentifier, let bundleURL = app.bundleURL else { return nil }
+                    return DockRunningApp(bundleID: id, urlString: bundleURL.absoluteString)
+                }
+                let target = matchingRunningBundleID(dockURLString: url, running: running)
+                let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+                return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: target,
+                                       frontmostBundleID: front, runningContainsTarget: target != nil,
+                                       hasModifier: dockModifiersHeld(flags), at: now)
+            }
+            guard allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: owner) else { return nil }
+            node = axAllowedElement(current, kAXParentAttribute, allow: axDockReadAllowList)
+        }
+        return nil
     }
 
     func prescan(_ app: NSRunningApplication) {
@@ -421,8 +509,8 @@ final class AppController: NSObject, NSApplicationDelegate {
             let hints = history.recent(for: activeID)
             if hints.isEmpty {
                 stack.addArrangedSubview(label("클릭을 단축키로", size: 15, weight: .semibold))
-                stack.addArrangedSubview(label("메뉴나 창 버튼을 눌러 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
-                stack.addArrangedSubview(label("Safari · Chrome · Finder\n창 버튼 · 브라우저 도구 막대 일부", size: 12, color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("메뉴, 창 버튼, Dock의 실행 중인 앱을 눌러 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("Safari · Chrome · Finder\n창 버튼 · Dock 앱 전환 · 브라우저 도구 막대 일부", size: 12, color: .secondaryLabelColor))
             }
             for hint in hints {
                 let row = NSStackView()
@@ -430,7 +518,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                 row.addArrangedSubview(label(hint.title, size: 13, weight: .medium))
                 row.addArrangedSubview(label(hint.shortcut ?? "단축키 미지정", size: hint.shortcut == nil ? 13 : 22,
                                             weight: .semibold, color: hint.shortcut == nil ? .secondaryLabelColor : .labelColor))
-                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : "도구 막대 → 메뉴")
+                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : (hint.source == "dock" ? "Dock → 앱 전환" : "도구 막대 → 메뉴"))
                 row.addArrangedSubview(label(caption, size: 10, color: .secondaryLabelColor))
                 stack.addArrangedSubview(row)
             }
@@ -491,7 +579,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         if logURL != nil {
             let state: [String: Any] = ["trusted": trusted, "listening": listener.running, "visible": panel.isVisible,
                                         "hidden": hidden, "events": listener.eventCount, "activeApp": activeID, "probe": validationProbe,
-                                        "hints": history.recent(for: activeID).filter { $0.source != "window" }.map {
+                                        "hints": history.recent(for: activeID).filter { $0.source != "window" && $0.source != "dock" }.map {
                                             ["title": $0.title, "shortcut": $0.shortcut ?? "", "source": $0.source]
                                         }]
             if let data = try? JSONSerialization.data(withJSONObject: state, options: [.sortedKeys, .prettyPrinted]) {
@@ -504,7 +592,17 @@ final class AppController: NSObject, NSApplicationDelegate {
         activeID = app.bundleIdentifier ?? ""; activeName = app.localizedName ?? "앱"
         listener.prescan(app)
     }
-    @objc private func activated(_ notification: Notification) { updateActive(); render() }
+    @objc private func activated(_ notification: Notification) {
+        if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+            let id = app.bundleIdentifier ?? ""
+            let name = app.localizedName ?? "앱"
+            if let hint = listener.noteDockActivation(bundleID: id, appName: name) {
+                history.add(hint)
+            }
+        }
+        updateActive()
+        render()
+    }
     @objc private func screenChanged(_ notification: Notification) { positionPanel() }
     @objc func togglePanel() {
         hidden.toggle()
@@ -518,7 +616,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") { NSWorkspace.shared.open(url) }
     }
     private func record(_ hint: Hint) {
-        guard hint.source != "window", let logURL else { return }
+        guard hint.source != "window", hint.source != "dock", let logURL else { return }
         let object: [String: String] = ["app": hint.appID, "title": hint.title, "shortcut": hint.shortcut ?? "", "source": hint.source]
         guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]) else { return }
         do {
