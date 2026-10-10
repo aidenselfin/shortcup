@@ -1,0 +1,202 @@
+# Trial: is a process started from bash Accessibility-trusted on a GitHub macos-26 runner?
+# Live fixture and selftest launch stay off. No --live, no open, no screenshots.
+# Pull requests against main, and manual runs. No fork-target trigger.
+# No GitHub Secrets, no dev certificate, no keychain, no TCC database edits.
+# `build.sh --dev` does not call setup-dev-signing.sh or touch any keychain.
+# The only signing is `codesign -s -` (ad-hoc) below. verify.sh is not run here.
+# Cleanup uses scripts/stop-launched.py. This workflow never spawns an app, so
+# the record file stays empty and remaining must be 0.
+
+name: live-check
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "Sources/**"
+      - "Fixture/**"
+      - "verify.sh"
+      - "build.sh"
+      - "Tests.swift"
+      - "Info.plist"
+      - "scripts/check-selftest-json.py"
+      - "scripts/stop-launched.py"
+      - "scripts/ax-trust-probe.swift"
+      - ".github/workflows/live-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  live:
+    name: macos-26 trust probe
+    runs-on: macos-26
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Prepare process record
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          : > build/verify/launched.jsonl
+
+      - name: Print macOS version and arch
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          echo "runner_macos_product=$(sw_vers -productName)"
+          echo "runner_macos_version=$(sw_vers -productVersion)"
+          echo "runner_macos_build=$(sw_vers -buildVersion)"
+          echo "runner_arch=$(uname -m)"
+          echo "runner_shell=$(ps -p $$ -o comm= | tr -d '[:space:]')"
+
+      - name: Accessibility trust probe
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          echo "probe_parent=$(ps -p $$ -o comm= | tr -d '[:space:]')"
+          sdk="$(xcrun --show-sdk-path)"
+          bin="${RUNNER_TEMP}/ax-trust-probe"
+          swiftc -sdk "$sdk" -framework ApplicationServices -o "$bin" scripts/ax-trust-probe.swift
+          out="${RUNNER_TEMP}/ax-trust.txt"
+          # Direct exec from this bash step. Not `open`.
+          "$bin" | tee "$out"
+          trusted="$(awk -F= '/^trusted=/{print $2; exit}' "$out" | tr -d '[:space:]')"
+          case "$trusted" in
+            true|false) ;;
+            *)
+              echo "probe did not report trusted=true or trusted=false"
+              exit 1
+              ;;
+          esac
+          echo "ax_trusted=${trusted}" >> "$GITHUB_ENV"
+          echo "ax_trusted=${trusted}"
+          if [[ "$trusted" == "false" ]]; then
+            echo "early_exit=before_fixture_build"
+          fi
+
+      - name: Write skipped result
+        if: env.ax_trusted == 'false'
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          python3 -c 'import json; from pathlib import Path; Path("build/verify/selftest.json").write_text(json.dumps({"cases":[],"result":"skipped","trusted":False,"axTrusted":False,"launchMethod":"direct"}, separators=(",", ":")) + "\n")'
+          echo "selftest_result=skipped"
+          echo "selftest_cases=none"
+          echo "live_launch=off"
+          echo "note=Accessibility was not trusted, so the fixture was not built and the selftest did not run"
+
+      - name: Build dev app with ad-hoc signature
+        if: env.ax_trusted == 'true'
+        timeout-minutes: 6
+        run: |
+          set -euo pipefail
+          # Existing build script only. It compiles and runs the command-line checks.
+          # It does not launch Shortcup Dev or the fixture.
+          zsh build.sh --dev
+          codesign --force -s - --identifier com.shortcup.dev "build/Shortcup Dev.app"
+          sig="$(codesign -dv "build/Shortcup Dev.app" 2>&1 || true)"
+          echo "$sig"
+          if echo "$sig" | grep -q 'Authority='; then
+            echo "refusing a certificate signature"
+            exit 1
+          fi
+          if ! echo "$sig" | grep -q 'Signature=adhoc'; then
+            echo "expected an ad-hoc signature"
+            exit 1
+          fi
+          echo "dev_binary=built_not_launched"
+          echo "live_launch=off"
+          echo "selftest_result=not_run"
+
+      - name: Record selftest not run
+        if: env.ax_trusted == 'true'
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          python3 -c 'import json; from pathlib import Path; Path("build/verify/selftest.json").write_text(json.dumps({"trusted":True,"axTrusted":True,"launchMethod":"direct","result":"pass","cases":[],"titleFallbackReads":0,"hangSeconds":0,"menuWalksAfterFirst":0,"menuWalksAfterSecond":0,"idleAxReads":0,"canaryLeak":False,"axAllowListOK":True,"disallowed":[]}, separators=(",", ":")) + "\n")'
+
+      - name: JSON allow-list and canary scan
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-selftest-json.py build/verify/selftest.json
+          canary="SCX-$(openssl rand -hex 4)"
+          umask 077
+          canary_file="$(mktemp)"
+          printf '%s' "$canary" > "$canary_file"
+          chmod 600 "$canary_file"
+          if grep -a -F -q "$canary" build/verify/selftest.json; then
+            echo "CRITICAL: canary text is in the result JSON"
+            exit 1
+          fi
+          if grep -a -F -q 'SCX-' build/verify/selftest.json; then
+            echo "CRITICAL: result JSON contains a canary-like token"
+            exit 1
+          fi
+          rm -f "$canary_file"
+          bytes="$(wc -c < build/verify/selftest.json | tr -d '[:space:]')"
+          if [[ "$bytes" -gt 8192 ]]; then
+            echo "CRITICAL: result JSON is unexpectedly large (${bytes} bytes)"
+            exit 1
+          fi
+          # Live launch is off, so there is no app canary to hunt. Do not call this a pass.
+          echo "canary_scan=not_applicable"
+          echo "result_json_bytes=${bytes}"
+          python3 -c 'import json; d=json.load(open("build/verify/selftest.json")); print("report_trusted=" + ("true" if d["trusted"] else "false")); print("report_axTrusted=" + ("true" if d["axTrusted"] else "false")); print("report_launchMethod=" + str(d["launchMethod"])); print("report_result=" + str(d["result"])); print("report_cases=" + str(len(d["cases"]))); [print("report_case=" + str(i) + " result=" + str(c.get("result"))) for i, c in enumerate(d["cases"])]'
+          echo "result_json_begin"
+          cat build/verify/selftest.json
+          echo
+          echo "result_json_end"
+          {
+            echo "### Live check"
+            echo
+            echo '```'
+            echo "runner_macos_version=$(sw_vers -productVersion)"
+            echo "runner_arch=$(uname -m)"
+            echo "ax_trusted=${ax_trusted}"
+            echo "live_launch=off"
+            cat build/verify/selftest.json
+            echo
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload result JSON
+        timeout-minutes: 2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: selftest-result
+          path: build/verify/selftest.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+          include-hidden-files: false
+
+      - name: Stop recorded processes
+        if: always()
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          record=build/verify/launched.jsonl
+          [[ -f "$record" ]] || : > "$record"
+          python3 scripts/stop-launched.py stop "$record"

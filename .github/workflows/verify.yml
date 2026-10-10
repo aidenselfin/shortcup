@@ -1,0 +1,80 @@
+# SAFE Shortcup checks on macos-26. The live script is not invoked.
+
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: SAFE verify
+    runs-on: macos-26
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Install pinned ripgrep
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          VERSION=14.1.1
+          ARCHIVE="ripgrep-${VERSION}-aarch64-apple-darwin.tar.gz"
+          URL="https://github.com/BurntSushi/ripgrep/releases/download/${VERSION}/${ARCHIVE}"
+          SHA256=24ad76777745fbff131c8fbc466742b011f925bfa4fffa2ded6def23b5b937be
+          TMP="$(/usr/bin/mktemp)"
+          /usr/bin/curl -sSL -o "$TMP" "$URL"
+          echo "${SHA256}  ${TMP}" | /usr/bin/shasum -a 256 -c -
+          /usr/bin/tar -xzf "$TMP" -C /tmp
+          DEST=/opt/homebrew/bin
+          if [[ ! -d "$DEST" ]]; then
+            DEST=/usr/local/bin
+            /bin/mkdir -p "$DEST"
+          fi
+          /bin/cp "/tmp/ripgrep-${VERSION}-aarch64-apple-darwin/rg" "$DEST/rg"
+          /bin/chmod 755 "$DEST/rg"
+          PCRE2_PREFIX=/opt/homebrew/opt/pcre2
+          if [[ ! -d /opt/homebrew ]]; then
+            PCRE2_PREFIX=/usr/local/opt/pcre2
+          fi
+          PCRE2_DYLIB="${PCRE2_PREFIX}/lib/libpcre2-8.0.dylib"
+          if [[ ! -f "$PCRE2_DYLIB" ]]; then
+            echo "FAIL: pcre2 is missing at ${PCRE2_DYLIB}. The pinned rg binary needs libpcre2-8.0.dylib."
+            exit 1
+          fi
+          if [[ -x "${PCRE2_PREFIX}/bin/pcre2-config" ]]; then
+            PCRE2_VER="$("${PCRE2_PREFIX}/bin/pcre2-config" --version)"
+            case "$PCRE2_VER" in
+              10.*) ;;
+              *)
+                echo "FAIL: pcre2 version is ${PCRE2_VER}, expected 10.x ABI for libpcre2-8.0.dylib"
+                exit 1
+                ;;
+            esac
+          fi
+          if ! "$DEST/rg" --version >/dev/null; then
+            echo "FAIL: rg could not load pcre2 at ${PCRE2_DYLIB}"
+            exit 1
+          fi
+
+      - name: SAFE verify
+        timeout-minutes: 10
+        env:
+          SHORTCUP_ESLOGGER: "1"
+        run: |
+          set -euo pipefail
+          /usr/bin/python3 scripts/watch-processes.py -- /bin/zsh -f verify.sh

@@ -97,7 +97,7 @@ import Carbon
     func menu(_ app: NSRunningApplication, group: [String], names: [String], verify: Bool = true) async -> AXUIElement? {
         await activate(app)
         let root = AXUIElementCreateApplication(app.processIdentifier)
-        AXUIElementSetMessagingTimeout(root, 0.2)
+        AXUIElementSetMessagingTimeout(root, axMessagingTimeout)
         guard let bar = axElement(root, kAXMenuBarAttribute),
               let top = axChildren(bar).first(where: { group.map(normalized).contains(normalized(axString($0, kAXTitleAttribute))) }) else {
             note("\(app.localizedName ?? "") / \(names[0])", false, "메뉴 그룹 없음"); return nil
@@ -146,7 +146,7 @@ import Carbon
         await activate(app)
         key(37, .maskCommand); await wait(0.4)
         let root = AXUIElementCreateApplication(expectedPID)
-        AXUIElementSetMessagingTimeout(root, 0.3)
+        AXUIElementSetMessagingTimeout(root, axMessagingTimeout)
         let field = axElement(root, kAXFocusedUIElementAttribute)
         let set = field.map { AXUIElementSetAttributeValue($0, kAXValueAttribute as CFString, url.absoluteString as CFString) == .success } ?? false
         if !set { type(url.absoluteString) }
