@@ -375,7 +375,7 @@ func resolveCommand(_ commands: [MenuCommand], aliases: [String]) -> MenuCommand
 
 // Dock switch: roles, bundle IDs, and file URLs only. No titles, AXValue, or screen text.
 // AXParent and AXURL are a scoped exception: Dock process, Dock-click path, in-memory compare only.
-// A stopped app icon reads AXIsApplicationRunning only. That path does not read a title or URL.
+// A stopped app icon reads AXIsApplicationRunning. When that is false, AXURL is read only to resolve the bundle id. No title.
 // Policy: PLAN.md "Dock 앱 전환".
 let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent", "AXIsApplicationRunning"]
 let axDockProcessOnlyAttributes: Set<String> = ["AXURL", "AXParent", "AXIsApplicationRunning"]
@@ -406,7 +406,7 @@ struct DockClickSample: Equatable {
     var targetBundleID: String?
     var frontmostBundleID: String
     var runningContainsTarget: Bool
-    // False only when Dock reports AXIsApplicationRunning as false. No title or URL is read then.
+    // False only when Dock reports AXIsApplicationRunning as false. Title is not read.
     var applicationRunning: Bool
     var hasModifier: Bool
     var at: Date
@@ -437,6 +437,8 @@ let dockSwitchShortcut = shortcutText(character: "", virtualKey: 48, glyph: nil,
 let dockLaunchTitle = "Spotlight"
 let spotlightSymbolicHotKeyID = "64"
 let spotlightHotKeysDomain = "com.apple.symbolichotkeys"
+// Apple's Spotlight default when key 64 was never written. Virtual key 49 is Space.
+let defaultSpotlightShortcut = shortcutText(character: "", virtualKey: 49, glyph: nil, modifiers: 0) ?? "⌘ Space"
 // Activations this far before the click are event-order races, not earlier launches.
 let dockLaunchSkew: TimeInterval = 0.05
 let dockBundleID = "com.apple.dock"
@@ -505,7 +507,7 @@ func symbolicParameterList(_ value: Any?) -> [Int]? {
 }
 
 // Key 64 entry: enabled plus value.parameters [character, key code, modifiers].
-// Disabled, missing, or not parseable returns nil so the caller shows no hint.
+// Disabled or not parseable returns nil. A missing entry is handled by spotlightShortcut(hotkeys:).
 func spotlightShortcut(symbolicHotKey entry: [String: Any]?) -> String? {
     guard let entry, symbolicEnabled(entry["enabled"]) == true else { return nil }
     guard let value = symbolicDictionary(entry["value"]),
@@ -523,11 +525,13 @@ func spotlightShortcut(symbolicHotKey entry: [String: Any]?) -> String? {
 }
 
 func spotlightShortcut(hotkeys: [String: Any]?) -> String? {
-    return spotlightShortcut(symbolicHotKey: symbolicDictionary(hotkeys?[spotlightSymbolicHotKeyID]))
+    guard let hotkeys, let raw = hotkeys[spotlightSymbolicHotKeyID] else { return defaultSpotlightShortcut }
+    return spotlightShortcut(symbolicHotKey: symbolicDictionary(raw))
 }
 
 func readSpotlightShortcut() -> String? {
-    guard let raw = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString, spotlightHotKeysDomain as CFString) else { return nil }
+    _ = CFPreferencesAppSynchronize(spotlightHotKeysDomain as CFString)
+    let raw = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString, spotlightHotKeysDomain as CFString)
     return spotlightShortcut(hotkeys: symbolicDictionary(raw))
 }
 
@@ -558,6 +562,13 @@ func standardizedAppPath(_ raw: String) -> String? {
     while path.hasSuffix("/") { path.removeLast() }
     guard path.lowercased().hasSuffix(".app") else { return nil }
     return path.lowercased()
+}
+
+func bundleID(ofAppURL raw: String?) -> String? {
+    guard let raw, standardizedAppPath(raw) != nil else { return nil }
+    let url = raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : URL(string: raw)
+    guard let url, url.isFileURL else { return nil }
+    return Bundle(url: url)?.bundleIdentifier
 }
 
 func matchingRunningBundleID(dockURLString: String?, running: [DockRunningApp]) -> String? {
@@ -604,7 +615,8 @@ func dockLaunchDecision(click: DockClickSample, activation: DockActivationSample
     guard !isIgnoredDockSubrole(click.subrole) else { return .ignore }
     guard isDockApplicationItem(role: click.role, subrole: click.subrole) else { return .ignore }
     guard !click.applicationRunning else { return .ignore }
-    guard !isShortcupBundleID(activation.bundleID) else { return .ignore }
+    guard let target = click.targetBundleID, !target.isEmpty, !isShortcupBundleID(target),
+          activation.bundleID == target else { return .ignore }
     guard confirmsNewLaunch(activation, click: click) else { return .ignore }
     let sinceClick = activation.at.timeIntervalSince(click.at)
     guard sinceClick >= -dockLaunchSkew, sinceClick <= settings.launchWindow else { return .ignore }
@@ -658,6 +670,7 @@ struct DockSwitchCorrelator: Equatable {
     private mutating func finishLaunch(now: Date) -> Hint? {
         guard let click = pendingClick, let act = pendingActivation, !click.applicationRunning else { return nil }
         guard confirmsNewLaunch(act, click: click) else { return nil }
+        guard act.bundleID == click.targetBundleID else { return nil }
         pendingClick = nil
         pendingActivation = nil
         guard let shortcut = resolvedSpotlightShortcut(spotlightBinding),

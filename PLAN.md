@@ -69,4 +69,4 @@
 
 창 버튼 경로는 `AXRole`, `AXSubrole`, `AXIdentifier`, 메뉴 단축키 속성, 표준 창 버튼 참조, 그리고 좁은 `AXTitle` 폴백만 읽는다.
 
-Dock 클릭 경로만, `com.apple.dock` 프로세스가 소유한 요소에 한해 `AXParent`와 `AXURL`을 읽는다. 실행 중이 아닌 앱 아이콘은 그 전에 Dock 프로세스에서 `AXIsApplicationRunning`(불리언)만 읽는다. 값이 거짓이면 제목과 URL은 읽지 않는다. 번들 ID가 Dock이 아니면 이 속성들을 읽기 전에 중단한다. URL은 실행 중 앱의 번들 URL과 메모리에서만 비교하고, 저장·기록·디스크 기록은 하지 않는다. 제목, 설명, 값, 자식은 읽지 않는다.
+Dock 클릭 경로만, `com.apple.dock` 프로세스가 소유한 요소에 한해 `AXParent`와 `AXURL`을 읽는다. 실행 중이 아닌 앱 아이콘은 Dock 프로세스에서 `AXIsApplicationRunning`(불리언)을 읽는다. 값이 거짓이면 제목은 읽지 않고, `AXURL`만 읽어 그 앱의 번들 ID를 메모리에서 구한다. 새로 실행된 앱의 번들 ID가 그 값과 같을 때만 Spotlight 힌트를 낸다. 번들 ID가 Dock이 아니면 이 속성들을 읽기 전에 중단한다. URL은 저장·기록하지 않고 디스크에 쓰지 않는다. 실행 중이면 실행 중 앱의 번들 URL과 메모리에서만 비교한다. 제목, 설명, 값, 자식은 읽지 않는다.

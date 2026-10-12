@@ -272,8 +272,8 @@ final class ClickListener {
         return runningApp.bundleIdentifier
     }
 
-    // Dock process only. AXRole and AXSubrole first. A stopped app icon reads AXIsApplicationRunning and not AXURL.
-    // AXParent and AXURL only after the owner is Dock, and only for the running-app path.
+    // Dock process only. AXRole and AXSubrole first. A stopped app icon reads AXIsApplicationRunning.
+    // When that is false, AXURL is read only to resolve the bundle id. No title. AXParent walks up to the item.
     private func dockClickSample(point: CGPoint, flags: CGEventFlags, now: Date) -> DockClickSample? {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, axMessagingTimeout)
@@ -293,7 +293,9 @@ final class ClickListener {
                 if isDockApplicationItem(role: role, subrole: subrole),
                    allowsDockScopedAXRead(attribute: "AXIsApplicationRunning", hostBundleID: owner),
                    axAllowedBool(current, kAXIsApplicationRunningAttribute as String, allow: axDockReadAllowList) == false {
-                    return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: nil,
+                    guard allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: owner) else { return nil }
+                    let target = bundleID(ofAppURL: axAllowedURLString(current, allow: axDockReadAllowList))
+                    return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: target,
                                            frontmostBundleID: front, runningContainsTarget: false, applicationRunning: false,
                                            hasModifier: dockModifiersHeld(flags), at: now)
                 }
