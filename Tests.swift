@@ -365,7 +365,7 @@ private func runDockSwitchChecks() {
     assert(dockLaunchDecision(click: dockClick(at: t0), activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
     assert(dockLaunchDecision(click: dockClick(target: nil, running: false, appRunning: false, modifier: true, at: t0),
                               activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
-    assert(dockLaunchDecision(click: dockClick(target: nil, running: false, appRunning: false, subrole: "AXFolderDockItem", at: t0),
+    assert(dockLaunchDecision(click: dockClick(target: nil, subrole: "AXFolderDockItem", running: false, appRunning: false, at: t0),
                               activation: dockActivation(id: "com.apple.finder", at: soon), lastHintAt: nil) == .ignore)
     assert(dockLaunchDecision(click: dockClick(target: nil, running: false, appRunning: false, host: "com.apple.finder", at: t0),
                               activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
