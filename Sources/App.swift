@@ -198,11 +198,13 @@ final class ClickListener {
         queue.async { self.candidate = nil; self.dock.cancelClick(); self.dockDown = nil }
     }
 
-    func noteDockActivation(bundleID: String, appName: String, now: Date = Date()) -> Hint? {
+    func noteDockActivation(bundleID: String, appName: String, launchDate: Date? = nil, freshLaunch: Bool = false, now: Date = Date()) -> Hint? {
         var hint: Hint?
         queue.sync {
             // viaKeyboard stays false. Cmd+Tab is ignored because a leftover Dock click is cleared.
-            hint = self.dock.noteActivation(DockActivationSample(bundleID: bundleID, appName: appName, viaKeyboard: false, at: now), now: now)
+            let sample = DockActivationSample(bundleID: bundleID, appName: appName, viaKeyboard: false, at: now,
+                                              launchDate: launchDate, freshLaunch: freshLaunch)
+            hint = self.dock.noteActivation(sample, now: now)
         }
         return hint
     }
@@ -395,6 +397,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         listener.onStatus = { [weak self] message in self?.monitorError = message; self?.render() }
         if logURL != nil { listener.onProbe = { [weak self] message in self?.validationProbe = message } }
         NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(activated), name: NSWorkspace.didActivateApplicationNotification, object: nil)
+        NSWorkspace.shared.notificationCenter.addObserver(self, selector: #selector(launched), name: NSWorkspace.didLaunchApplicationNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(screenChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
         if validation { createFixture() }
         #if SHORTCUP_DEV
@@ -608,13 +611,22 @@ final class AppController: NSObject, NSApplicationDelegate {
         activeID = app.bundleIdentifier ?? ""; activeName = app.localizedName ?? "앱"
         listener.prescan(app)
     }
+    private func noteWorkspaceApp(_ app: NSRunningApplication, freshLaunch: Bool) {
+        let id = app.bundleIdentifier ?? ""
+        let name = app.localizedName ?? "앱"
+        if let hint = listener.noteDockActivation(bundleID: id, appName: name, launchDate: app.launchDate, freshLaunch: freshLaunch) {
+            history.add(hint)
+        }
+    }
+    @objc private func launched(_ notification: Notification) {
+        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        noteWorkspaceApp(app, freshLaunch: true)
+        updateActive()
+        render()
+    }
     @objc private func activated(_ notification: Notification) {
         if let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
-            let id = app.bundleIdentifier ?? ""
-            let name = app.localizedName ?? "앱"
-            if let hint = listener.noteDockActivation(bundleID: id, appName: name) {
-                history.add(hint)
-            }
+            noteWorkspaceApp(app, freshLaunch: false)
         }
         updateActive()
         render()
