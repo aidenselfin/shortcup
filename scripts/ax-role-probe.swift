@@ -129,7 +129,20 @@ func nodeObject(_ node: Node) -> [String: Any] {
 
 func chrome(_ window: AXUIElement) -> [Node] {
     axChildren(window).prefix(40).enumerated().map { index, child in
-        Node(role: axRole(child), subrole: axSubrole(child), depth: 0, index: index, children: [])
+        let role = axRole(child)
+        var kids: [Node] = []
+        if role == "AXSplitGroup" {
+            kids = axChildren(child).prefix(40).enumerated().map { childIndex, grandchild in
+                Node(
+                    role: axRole(grandchild),
+                    subrole: axSubrole(grandchild),
+                    depth: 1,
+                    index: childIndex,
+                    children: []
+                )
+            }
+        }
+        return Node(role: role, subrole: axSubrole(child), depth: 0, index: index, children: kids)
     }
 }
 
