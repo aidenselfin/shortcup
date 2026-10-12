@@ -238,9 +238,123 @@ import Foundation
         assert(hans == zhCN)
         assert(menuLocaleColumn(localeTable, language: "zh-Hans") == menuLocaleColumn(localeTable, language: "zh-Hans"))
         try replayFixtures()
-        print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history, window button mapping")
+        runDockSwitchChecks()
+        print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history, window button mapping, dock switch")
         print("PASS: snapshot replay, glyph table, locale, cache, AX allow-list")
     }
+}
+
+private func dockClick(target: String? = "com.apple.Safari", subrole: String = "AXApplicationDockItem",
+                       front: String = "com.google.Chrome", running: Bool = true, modifier: Bool = false,
+                       host: String = "com.apple.dock", at: Date = Date(timeIntervalSince1970: 1_700_000_000)) -> DockClickSample {
+    DockClickSample(hostBundleID: host, role: "AXDockItem", subrole: subrole, targetBundleID: target,
+                    frontmostBundleID: front, runningContainsTarget: running && target != nil,
+                    hasModifier: modifier, at: at)
+}
+
+private func dockActivation(id: String = "com.apple.Safari", keyboard: Bool = false,
+                            at: Date = Date(timeIntervalSince1970: 1_700_000_050)) -> DockActivationSample {
+    DockActivationSample(bundleID: id, appName: "Safari", viaKeyboard: keyboard, at: at)
+}
+
+private func runDockSwitchChecks() {
+    let t0 = Date(timeIntervalSince1970: 1_700_000_000)
+    let soon = t0.addingTimeInterval(0.05)
+    let late = t0.addingTimeInterval(1.2)
+    let running = [DockRunningApp(bundleID: "com.apple.Safari", urlString: "file:///Applications/Safari.app/"),
+                   DockRunningApp(bundleID: "com.google.Chrome", urlString: "file:///Applications/Google%20Chrome.app")]
+    assert(standardizedAppPath("file:///Applications/Safari.app/") == "/applications/safari.app")
+    assert(standardizedAppPath("/Applications/Safari.app") == "/applications/safari.app")
+    assert(standardizedAppPath("file:///Applications/Safari.app/Contents") == nil)
+    assert(standardizedAppPath("https://example.invalid/Safari.app") == nil)
+    assert(matchingRunningBundleID(dockURLString: "file:///Applications/Safari.app/", running: running) == "com.apple.Safari")
+    assert(matchingRunningBundleID(dockURLString: "file:///Applications/Notes.app/", running: running) == nil)
+    assert(matchingRunningBundleID(dockURLString: nil, running: running) == nil)
+    assert(matchingRunningBundleID(dockURLString: "file:///Applications/Safari.app/",
+                                   running: running + [DockRunningApp(bundleID: "com.apple.Safari.WebApp",
+                                                                      urlString: "file:///Applications/Safari.app")]) == nil)
+    assert(isDockApplicationItem(role: "AXDockItem", subrole: "AXApplicationDockItem"))
+    assert(!isDockApplicationItem(role: "AXDockItem", subrole: "AXTrashDockItem"))
+    assert(isIgnoredDockSubrole("AXFolderDockItem") && isIgnoredDockSubrole("AXTrashDockItem"))
+    assert(isIgnoredDockSubrole("AXDocumentDockItem") && isIgnoredDockSubrole("AXMinimizedWindowDockItem"))
+    assert(isIgnoredDockSubrole("AXURLDockItem"))
+    assert(!axDockReadAllowList.contains("AXTitle"))
+    assert(!axDockReadAllowList.contains("AXDescription"))
+    assert(!axDockReadAllowList.contains("AXValue"))
+    assert(axDockReadAllowList == ["AXRole", "AXSubrole", "AXURL", "AXParent"])
+    assert(allowsDockScopedAXRead(attribute: "AXRole", hostBundleID: "com.apple.dock"))
+    assert(allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: "com.apple.dock"))
+    assert(allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: "com.apple.dock"))
+    assert(!allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: "com.apple.Safari"))
+    assert(!allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: "com.apple.Safari"))
+    assert(!allowsDockScopedAXRead(attribute: "AXTitle", hostBundleID: "com.apple.dock"))
+    assert(dockSwitchShortcut == "⌘ ⇥")
+    assert(dockSwitchHint(appID: "com.apple.Safari", appName: "Safari").source == "dock")
+    assert(dockSwitchHint(appID: "com.apple.Safari", appName: "Safari").title == dockSwitchTitle)
+    assert(dockSwitchDecision(click: dockClick(at: t0), activation: dockActivation(at: soon), lastHintAt: nil) == .show)
+    assert(dockSwitchDecision(click: dockClick(target: nil, running: false, at: t0),
+                              activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.Notes", running: false, at: t0),
+                              activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(at: t0),
+                              activation: dockActivation(keyboard: true, at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.finder", subrole: "AXFolderDockItem", at: t0),
+                              activation: dockActivation(id: "com.apple.finder", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.finder", subrole: "AXTrashDockItem", at: t0),
+                              activation: dockActivation(id: "com.apple.finder", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(target: "com.apple.Safari", subrole: "AXDocumentDockItem", at: t0),
+                              activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(front: "com.apple.Safari", at: t0),
+                              activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(modifier: true, at: t0),
+                              activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(host: "com.apple.finder", at: t0),
+                              activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(target: "com.shortcup.app", at: t0),
+                              activation: dockActivation(id: "com.shortcup.app", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(at: t0),
+                              activation: dockActivation(id: "com.google.Chrome", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(at: t0),
+                              activation: dockActivation(at: late), lastHintAt: nil) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(at: t0),
+                              activation: dockActivation(at: soon), lastHintAt: t0.addingTimeInterval(-2)) == .ignore)
+    assert(dockSwitchDecision(click: dockClick(at: t0),
+                              activation: dockActivation(at: soon), lastHintAt: t0.addingTimeInterval(-12)) == .show)
+    var off = DockSwitchSettings.standard
+    off.enabled = false
+    assert(dockSwitchDecision(click: dockClick(at: t0), activation: dockActivation(at: soon),
+                              lastHintAt: nil, settings: off) == .ignore)
+    var correlator = DockSwitchCorrelator()
+    assert(correlator.noteClick(dockClick(at: t0), now: t0) == nil)
+    let first = correlator.noteActivation(dockActivation(at: soon), now: soon)
+    assert(first?.shortcut == "⌘ ⇥")
+    assert(first?.appID == "com.apple.Safari")
+    assert(first?.source == "dock")
+    assert(correlator.noteClick(dockClick(at: soon.addingTimeInterval(0.1)), now: soon.addingTimeInterval(0.1)) == nil)
+    assert(correlator.noteActivation(dockActivation(at: soon.addingTimeInterval(0.15)), now: soon.addingTimeInterval(0.15)) == nil)
+    var raced = DockSwitchCorrelator()
+    assert(raced.noteActivation(dockActivation(at: t0), now: t0) == nil)
+    let racedHint = raced.noteClick(dockClick(at: t0.addingTimeInterval(0.04)), now: t0.addingTimeInterval(0.04))
+    assert(racedHint?.source == "dock")
+    var expired = DockSwitchCorrelator()
+    assert(expired.noteClick(dockClick(at: t0), now: t0) == nil)
+    assert(expired.noteActivation(dockActivation(at: late), now: late) == nil)
+    var dragged = DockSwitchCorrelator()
+    assert(dragged.noteClick(dockClick(at: t0), now: t0) == nil)
+    dragged.cancelClick()
+    assert(dragged.noteActivation(dockActivation(at: soon), now: soon) == nil)
+    var ignoredClick = DockSwitchCorrelator()
+    assert(ignoredClick.noteClick(dockClick(front: "com.apple.Safari", at: t0), now: t0) == nil)
+    assert(ignoredClick.noteActivation(dockActivation(at: soon), now: soon) == nil)
+    assert(ignoredClick.pendingClick == nil)
+    assert(ignoredClick.pendingActivation == nil)
+    assert(ignoredClick.noteActivation(dockActivation(at: soon.addingTimeInterval(0.1)), now: soon.addingTimeInterval(0.1)) == nil)
+    var hideThenTab = DockSwitchCorrelator()
+    assert(hideThenTab.noteClick(dockClick(at: t0), now: t0) == nil)
+    assert(hideThenTab.noteActivation(dockActivation(id: "com.google.Chrome", at: soon), now: soon) == nil)
+    assert(hideThenTab.pendingClick == nil)
+    assert(hideThenTab.pendingActivation == nil)
+    assert(hideThenTab.noteActivation(dockActivation(at: soon.addingTimeInterval(0.05)), now: soon.addingTimeInterval(0.05)) == nil)
 }
 
 private func plant(_ world: SnapshotWorld, canary: String) {
