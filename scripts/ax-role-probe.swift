@@ -14,6 +14,19 @@ let skipDeep: Set<String> = [
     "AXSplitGroup",
 ]
 
+final class NodeBudget {
+    var remaining: Int
+    private(set) var truncated = false
+
+    init(_ maxNodes: Int) {
+        remaining = maxNodes
+    }
+
+    func omit() {
+        truncated = true
+    }
+}
+
 struct Node {
     var role: String
     var subrole: String?
@@ -44,9 +57,25 @@ func axSubrole(_ element: AXUIElement) -> String? {
     return roleToken(value as? String)
 }
 
-func axChildren(_ element: AXUIElement) -> [AXUIElement] {
-    let (_, value) = axCopy(element, kAXChildrenAttribute as CFString)
-    return value as? [AXUIElement] ?? []
+func axChildren(_ element: AXUIElement, budget: NodeBudget) -> [AXUIElement] {
+    var count: CFIndex = 0
+    let countError = AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count)
+    if countError != .success || count <= 0 { return [] }
+    let take = min(Int(count), budget.remaining)
+    if take < Int(count) { budget.omit() }
+    if take <= 0 { return [] }
+    var values: CFArray?
+    let error = AXUIElementCopyAttributeValues(
+        element,
+        kAXChildrenAttribute as CFString,
+        0,
+        CFIndex(take),
+        &values
+    )
+    guard error == .success, let children = values as? [AXUIElement] else { return [] }
+    budget.remaining -= children.count
+    if children.count < Int(count) { budget.omit() }
+    return children
 }
 
 func axWindows(_ app: AXUIElement) -> (AXError, [AXUIElement]) {
@@ -62,7 +91,7 @@ func pickWindow(_ windows: [AXUIElement]) -> AXUIElement? {
     windows.first { axSubrole($0) == "AXStandardWindow" } ?? windows.first
 }
 
-func findFirst(_ root: AXUIElement, where pred: (AXUIElement, String) -> Bool) -> AXUIElement? {
+func findFirst(_ root: AXUIElement, budget: NodeBudget, where pred: (AXUIElement, String) -> Bool) -> AXUIElement? {
     var queue: [(AXUIElement, Int)] = [(root, 0)]
     var i = 0
     while i < queue.count {
@@ -71,22 +100,22 @@ func findFirst(_ root: AXUIElement, where pred: (AXUIElement, String) -> Bool) -
         let role = axRole(element)
         if pred(element, role) { return element }
         if skipDeep.contains(role) || depth >= maxDepth { continue }
-        for child in axChildren(element) {
+        for child in axChildren(element, budget: budget) {
             queue.append((child, depth + 1))
         }
     }
     return nil
 }
 
-func findTabStrip(_ window: AXUIElement) -> AXUIElement? {
-    if let group = findFirst(window, where: { _, role in role == "AXTabGroup" }) {
+func findTabStrip(_ window: AXUIElement, budget: NodeBudget) -> AXUIElement? {
+    if let group = findFirst(window, budget: budget, where: { _, role in role == "AXTabGroup" }) {
         return group
     }
     var tabParent: AXUIElement?
     var radioParent: AXUIElement?
-    _ = findFirst(window) { element, role in
+    _ = findFirst(window, budget: budget) { element, role in
         if skipDeep.contains(role) { return false }
-        let kids = axChildren(element)
+        let kids = axChildren(element, budget: budget)
         if tabParent == nil && kids.contains(where: { axRole($0) == "AXTab" }) {
             tabParent = element
         }
@@ -98,23 +127,18 @@ func findTabStrip(_ window: AXUIElement) -> AXUIElement? {
     return tabParent ?? radioParent
 }
 
-func dumpTree(_ root: AXUIElement) -> (Node, Bool) {
-    var remaining = maxNodes
+func dumpTree(_ root: AXUIElement, budget: NodeBudget) -> Node {
     func walk(_ element: AXUIElement, depth: Int, index: Int) -> Node {
         let role = axRole(element)
         var kids: [Node] = []
-        if depth < maxDepth && remaining > 0 && !skipDeep.contains(role) {
-            for (childIndex, child) in axChildren(element).prefix(40).enumerated() {
-                guard remaining > 0 else { break }
-                remaining -= 1
+        if depth < maxDepth && !skipDeep.contains(role) {
+            for (childIndex, child) in axChildren(element, budget: budget).enumerated() {
                 kids.append(walk(child, depth: depth + 1, index: childIndex))
             }
         }
         return Node(role: role, subrole: axSubrole(element), depth: depth, index: index, children: kids)
     }
-    remaining -= 1
-    let tree = walk(root, depth: 0, index: 0)
-    return (tree, remaining <= 0)
+    return walk(root, depth: 0, index: 0)
 }
 
 func nodeObject(_ node: Node) -> [String: Any] {
@@ -127,12 +151,12 @@ func nodeObject(_ node: Node) -> [String: Any] {
     ]
 }
 
-func chrome(_ window: AXUIElement) -> [Node] {
-    axChildren(window).prefix(40).enumerated().map { index, child in
+func chrome(_ window: AXUIElement, budget: NodeBudget) -> [Node] {
+    axChildren(window, budget: budget).enumerated().map { index, child in
         let role = axRole(child)
         var kids: [Node] = []
         if role == "AXSplitGroup" {
-            kids = axChildren(child).prefix(40).enumerated().map { childIndex, grandchild in
+            kids = axChildren(child, budget: budget).enumerated().map { childIndex, grandchild in
                 Node(
                     role: axRole(grandchild),
                     subrole: axSubrole(grandchild),
@@ -171,7 +195,7 @@ var reason = trusted ? "ok" : "trusted=false"
 var safari: [String: Any] = ["running": false]
 var finder: [String: Any] = ["running": false]
 
-func probe(bundle: String, label: inout [String: Any], root pick: (AXUIElement) -> AXUIElement?) -> String {
+func probe(bundle: String, label: inout [String: Any], root pick: (AXUIElement, NodeBudget) -> AXUIElement?) -> String {
     guard let pid = runningPID(bundle) else { return "\(bundle == "com.apple.Safari" ? "safari" : "finder")-not-running" }
     label["running"] = true
     guard trusted else { return reason }
@@ -185,19 +209,15 @@ func probe(bundle: String, label: inout [String: Any], root pick: (AXUIElement) 
     label["windowCount"] = windows.count
     guard let window = pickWindow(windows) else { return "no-\(bundle == "com.apple.Safari" ? "safari" : "finder")-window" }
     AXUIElementSetMessagingTimeout(window, 1.0)
-    label["chrome"] = chrome(window).map(nodeObject)
-    var truncated = false
-    if let bar = findFirst(window, where: { _, role in role == "AXToolbar" }) {
-        let dumped = dumpTree(bar)
-        label["toolbar"] = nodeObject(dumped.0)
-        truncated = dumped.1
+    let budget = NodeBudget(maxNodes)
+    label["chrome"] = chrome(window, budget: budget).map(nodeObject)
+    if let bar = findFirst(window, budget: budget, where: { _, role in role == "AXToolbar" }) {
+        label["toolbar"] = nodeObject(dumpTree(bar, budget: budget))
     }
-    if bundle == "com.apple.Safari", let strip = pick(window) {
-        let dumped = dumpTree(strip)
-        label["tabStrip"] = nodeObject(dumped.0)
-        truncated = truncated || dumped.1
+    if bundle == "com.apple.Safari", let strip = pick(window, budget) {
+        label["tabStrip"] = nodeObject(dumpTree(strip, budget: budget))
     }
-    label["truncated"] = truncated
+    label["truncated"] = budget.truncated
     return "ok"
 }
 
@@ -206,8 +226,8 @@ for _ in 0..<20 {
     Thread.sleep(forTimeInterval: 0.5)
 }
 
-let safariStatus = probe(bundle: "com.apple.Safari", label: &safari) { findTabStrip($0) }
-let finderStatus = probe(bundle: "com.apple.finder", label: &finder) { findFirst($0, where: { _, role in role == "AXToolbar" }) }
+let safariStatus = probe(bundle: "com.apple.Safari", label: &safari) { findTabStrip($0, budget: $1) }
+let finderStatus = probe(bundle: "com.apple.finder", label: &finder) { findFirst($0, budget: $1, where: { _, role in role == "AXToolbar" }) }
 
 if reason == "ok" {
     if safariStatus != "ok" { reason = safariStatus }
