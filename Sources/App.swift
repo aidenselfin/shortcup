@@ -294,7 +294,7 @@ final class ClickListener {
                    allowsDockScopedAXRead(attribute: "AXIsApplicationRunning", hostBundleID: owner),
                    axAllowedBool(current, kAXIsApplicationRunningAttribute as String, allow: axDockReadAllowList) == false {
                     guard allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: owner) else { return nil }
-                    let target = bundleID(ofAppURL: axAllowedURLString(current, allow: axDockReadAllowList))
+                    let target = appBundleID(at: axAllowedURLString(current, allow: axDockReadAllowList))
                     return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: target,
                                            frontmostBundleID: front, runningContainsTarget: false, applicationRunning: false,
                                            hasModifier: dockModifiersHeld(flags), at: now)

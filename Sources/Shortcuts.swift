@@ -564,7 +564,7 @@ func standardizedAppPath(_ raw: String) -> String? {
     return path.lowercased()
 }
 
-func bundleID(ofAppURL raw: String?) -> String? {
+func appBundleID(at raw: String?) -> String? {
     guard let raw, standardizedAppPath(raw) != nil else { return nil }
     let url = raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : URL(string: raw)
     guard let url, url.isFileURL else { return nil }
