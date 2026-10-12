@@ -11,6 +11,7 @@ let maxNodes = 200
 let skipDeep: Set<String> = [
     "AXWebArea", "AXMenuBar", "AXMenu", "AXMenuItem",
     "AXList", "AXOutline", "AXTable", "AXBrowser",
+    "AXSplitGroup",
 ]
 
 struct Node {
@@ -172,11 +173,18 @@ func probe(bundle: String, label: inout [String: Any], root pick: (AXUIElement) 
     guard let window = pickWindow(windows) else { return "no-\(bundle == "com.apple.Safari" ? "safari" : "finder")-window" }
     AXUIElementSetMessagingTimeout(window, 1.0)
     label["chrome"] = chrome(window).map(nodeObject)
-    if let root = pick(window) {
-        let (tree, truncated) = dumpTree(root)
-        label[bundle == "com.apple.Safari" ? "tabStrip" : "toolbar"] = nodeObject(tree)
-        label["truncated"] = truncated
+    var truncated = false
+    if let bar = findFirst(window, where: { _, role in role == "AXToolbar" }) {
+        let dumped = dumpTree(bar)
+        label["toolbar"] = nodeObject(dumped.0)
+        truncated = dumped.1
     }
+    if bundle == "com.apple.Safari", let strip = pick(window) {
+        let dumped = dumpTree(strip)
+        label["tabStrip"] = nodeObject(dumped.0)
+        truncated = truncated || dumped.1
+    }
+    label["truncated"] = truncated
     return "ok"
 }
 
@@ -191,14 +199,15 @@ let finderStatus = probe(bundle: "com.apple.finder", label: &finder) { findFirst
 if reason == "ok" {
     if safariStatus != "ok" { reason = safariStatus }
     else if finderStatus != "ok" { reason = finderStatus }
-    else if safari["tabStrip"] == nil && trusted && safari["running"] as? Bool == true {
+    else if safari["toolbar"] == nil && safari["tabStrip"] == nil && safari["running"] as? Bool == true {
         reason = "no-tab-strip"
-    } else if finder["toolbar"] == nil && trusted && finder["running"] as? Bool == true {
+    } else if finder["toolbar"] == nil && finder["running"] as? Bool == true {
         reason = "no-toolbar"
     }
 }
 
 if safari["tabStrip"] == nil { safari["tabStrip"] = NSNull() }
+if safari["toolbar"] == nil { safari["toolbar"] = NSNull() }
 if finder["toolbar"] == nil { finder["toolbar"] = NSNull() }
 
 let report: [String: Any] = [
