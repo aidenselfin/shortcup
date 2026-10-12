@@ -138,6 +138,7 @@ final class ClickListener {
     private(set) var eventCount = 0
     private var dock = DockSwitchCorrelator()
     private var dockDown: CGPoint?
+    private var dockBundleCache = DockBundleURLCache()
     #if SHORTCUP_DEV
     // Self-test only. A click is inspected when it is inside this rect and the hit
     // belongs to the fixture bundle and pid. CGRect.null matches nothing.
@@ -250,9 +251,20 @@ final class ClickListener {
                 dockDown = nil
             }
         } else if type == .leftMouseUp {
+            dockDown = nil
             defer { candidate = nil }
             guard let (hint, down) = candidate, hypot(point.x - down.x, point.y - down.y) < 8 else { return }
             DispatchQueue.main.async { self.onHint?(hint) }
+        }
+    }
+
+    private func runningDockApps() -> [DockRunningApp] {
+        let apps = NSWorkspace.shared.runningApplications
+        return dockBundleCache.apps(pids: apps.map { Int($0.processIdentifier) }) {
+            apps.compactMap { app in
+                guard let id = app.bundleIdentifier, let bundleURL = app.bundleURL else { return nil }
+                return DockRunningApp(bundleID: id, urlString: bundleURL.absoluteString)
+            }
         }
     }
 
@@ -281,11 +293,7 @@ final class ClickListener {
             if isDockItemRole(role) {
                 guard allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: owner) else { return nil }
                 let url = axAllowedURLString(current, allow: axDockReadAllowList)
-                let running = NSWorkspace.shared.runningApplications.compactMap { app -> DockRunningApp? in
-                    guard let id = app.bundleIdentifier, let bundleURL = app.bundleURL else { return nil }
-                    return DockRunningApp(bundleID: id, urlString: bundleURL.absoluteString)
-                }
-                let target = matchingRunningBundleID(dockURLString: url, running: running)
+                let target = matchingRunningBundleID(dockURLString: url, running: runningDockApps())
                 let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
                 return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: target,
                                        frontmostBundleID: front, runningContainsTarget: target != nil,
