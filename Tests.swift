@@ -245,11 +245,12 @@ import Foundation
 }
 
 private func dockClick(target: String? = "com.apple.Safari", subrole: String = "AXApplicationDockItem",
-                       front: String = "com.google.Chrome", running: Bool = true, modifier: Bool = false,
-                       host: String = "com.apple.dock", at: Date = Date(timeIntervalSince1970: 1_700_000_000)) -> DockClickSample {
+                       front: String = "com.google.Chrome", running: Bool = true, appRunning: Bool = true,
+                       modifier: Bool = false, host: String = "com.apple.dock",
+                       at: Date = Date(timeIntervalSince1970: 1_700_000_000)) -> DockClickSample {
     DockClickSample(hostBundleID: host, role: "AXDockItem", subrole: subrole, targetBundleID: target,
                     frontmostBundleID: front, runningContainsTarget: running && target != nil,
-                    hasModifier: modifier, at: at)
+                    applicationRunning: appRunning, hasModifier: modifier, at: at)
 }
 
 private func dockActivation(id: String = "com.apple.Safari", keyboard: Bool = false,
@@ -281,14 +282,17 @@ private func runDockSwitchChecks() {
     assert(!axDockReadAllowList.contains("AXTitle"))
     assert(!axDockReadAllowList.contains("AXDescription"))
     assert(!axDockReadAllowList.contains("AXValue"))
-    assert(axDockReadAllowList == ["AXRole", "AXSubrole", "AXURL", "AXParent"])
+    assert(axDockReadAllowList == ["AXRole", "AXSubrole", "AXURL", "AXParent", "AXIsApplicationRunning"])
     assert(allowsDockScopedAXRead(attribute: "AXRole", hostBundleID: "com.apple.dock"))
     assert(allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: "com.apple.dock"))
     assert(allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: "com.apple.dock"))
+    assert(allowsDockScopedAXRead(attribute: "AXIsApplicationRunning", hostBundleID: "com.apple.dock"))
     assert(!allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: "com.apple.Safari"))
     assert(!allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: "com.apple.Safari"))
+    assert(!allowsDockScopedAXRead(attribute: "AXIsApplicationRunning", hostBundleID: "com.apple.Safari"))
     assert(!allowsDockScopedAXRead(attribute: "AXTitle", hostBundleID: "com.apple.dock"))
     assert(dockSwitchShortcut == "⌘ ⇥")
+    assert(dockLaunchShortcut == "⌘ Space")
     assert(dockSwitchHint(appID: "com.apple.Safari", appName: "Safari").source == "dock")
     assert(dockSwitchHint(appID: "com.apple.Safari", appName: "Safari").title == dockSwitchTitle)
     assert(dockSwitchDecision(click: dockClick(at: t0), activation: dockActivation(at: soon), lastHintAt: nil) == .show)
@@ -355,6 +359,42 @@ private func runDockSwitchChecks() {
     assert(hideThenTab.pendingClick == nil)
     assert(hideThenTab.pendingActivation == nil)
     assert(hideThenTab.noteActivation(dockActivation(at: soon.addingTimeInterval(0.05)), now: soon.addingTimeInterval(0.05)) == nil)
+    let stopped = dockClick(target: nil, running: false, appRunning: false, at: t0)
+    assert(dockSwitchDecision(click: stopped, activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: stopped, activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .show)
+    assert(dockLaunchDecision(click: dockClick(at: t0), activation: dockActivation(at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: dockClick(target: nil, running: false, appRunning: false, modifier: true, at: t0),
+                              activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: dockClick(target: nil, running: false, appRunning: false, subrole: "AXFolderDockItem", at: t0),
+                              activation: dockActivation(id: "com.apple.finder", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: dockClick(target: nil, running: false, appRunning: false, host: "com.apple.finder", at: t0),
+                              activation: dockActivation(id: "com.apple.Notes", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: stopped, activation: dockActivation(id: "com.apple.Notes", keyboard: true, at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: stopped, activation: dockActivation(id: "com.apple.Notes", at: late), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: stopped, activation: dockActivation(id: "com.shortcup.app", at: soon), lastHintAt: nil) == .ignore)
+    assert(dockLaunchDecision(click: stopped, activation: dockActivation(id: "com.apple.Notes", at: soon),
+                              lastHintAt: t0.addingTimeInterval(-2)) == .ignore)
+    assert(dockLaunchDecision(click: stopped, activation: dockActivation(id: "com.apple.Notes", at: soon),
+                              lastHintAt: t0.addingTimeInterval(-12)) == .show)
+    assert(dockLaunchHint(appID: "com.apple.Notes", appName: "Notes").shortcut == "⌘ Space")
+    assert(dockLaunchHint(appID: "com.apple.Notes", appName: "Notes").source == "dock")
+    var launch = DockSwitchCorrelator()
+    assert(launch.noteClick(stopped, now: t0) == nil)
+    let launched = launch.noteActivation(dockActivation(id: "com.apple.Notes", at: soon), now: soon)
+    assert(launched?.shortcut == "⌘ Space")
+    assert(launched?.title == dockLaunchTitle)
+    assert(launched?.appID == "com.apple.Notes")
+    assert(launch.noteClick(dockClick(target: nil, running: false, appRunning: false, at: soon.addingTimeInterval(1)), now: soon.addingTimeInterval(1)) == nil)
+    assert(launch.noteActivation(dockActivation(id: "com.apple.Notes", at: soon.addingTimeInterval(1.05)), now: soon.addingTimeInterval(1.05)) == nil)
+    var racedLaunch = DockSwitchCorrelator()
+    assert(racedLaunch.noteActivation(dockActivation(id: "com.apple.Notes", at: t0), now: t0) == nil)
+    let racedLaunchHint = racedLaunch.noteClick(dockClick(target: nil, running: false, appRunning: false, at: t0.addingTimeInterval(0.04)), now: t0.addingTimeInterval(0.04))
+    assert(racedLaunchHint?.shortcut == "⌘ Space")
+    assert(racedLaunchHint?.appID == "com.apple.Notes")
+    var draggedLaunch = DockSwitchCorrelator()
+    assert(draggedLaunch.noteClick(dockClick(target: nil, running: false, appRunning: false, at: t0), now: t0) == nil)
+    draggedLaunch.cancelClick()
+    assert(draggedLaunch.noteActivation(dockActivation(id: "com.apple.Notes", at: soon), now: soon) == nil)
 }
 
 private func plant(_ world: SnapshotWorld, canary: String) {

@@ -36,6 +36,13 @@ func axAllowedElement(_ element: AXUIElement, _ name: String, allow: Set<String>
     guard axAllowed(name, allow: allow) else { return nil }
     return axElement(element, name)
 }
+func axAllowedBool(_ element: AXUIElement, _ name: String, allow: Set<String>) -> Bool? {
+    guard axAllowed(name, allow: allow) else { return nil }
+    guard let value = axValue(element, name) else { return nil }
+    if let bool = value as? Bool { return bool }
+    if let number = value as? NSNumber { return number.boolValue }
+    return nil
+}
 func axAllowedURLString(_ element: AXUIElement, allow: Set<String>) -> String? {
     guard axAllowed("AXURL", allow: allow) else { return nil }
     guard let value = axValue(element, kAXURLAttribute) else { return nil }
@@ -263,7 +270,8 @@ final class ClickListener {
         return runningApp.bundleIdentifier
     }
 
-    // Dock process only. AXRole and AXSubrole first. AXParent and AXURL only after the owner is Dock.
+    // Dock process only. AXRole and AXSubrole first. A stopped app icon reads AXIsApplicationRunning and not AXURL.
+    // AXParent and AXURL only after the owner is Dock, and only for the running-app path.
     private func dockClickSample(point: CGPoint, flags: CGEventFlags, now: Date) -> DockClickSample? {
         let system = AXUIElementCreateSystemWide()
         AXUIElementSetMessagingTimeout(system, axMessagingTimeout)
@@ -279,6 +287,14 @@ final class ClickListener {
             let role = axAllowedString(current, kAXRoleAttribute, allow: axDockReadAllowList)
             let subrole = axAllowedString(current, kAXSubroleAttribute, allow: axDockReadAllowList)
             if isDockItemRole(role) {
+                let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+                if isDockApplicationItem(role: role, subrole: subrole),
+                   allowsDockScopedAXRead(attribute: "AXIsApplicationRunning", hostBundleID: owner),
+                   axAllowedBool(current, kAXIsApplicationRunningAttribute as String, allow: axDockReadAllowList) == false {
+                    return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: nil,
+                                           frontmostBundleID: front, runningContainsTarget: false, applicationRunning: false,
+                                           hasModifier: dockModifiersHeld(flags), at: now)
+                }
                 guard allowsDockScopedAXRead(attribute: "AXURL", hostBundleID: owner) else { return nil }
                 let url = axAllowedURLString(current, allow: axDockReadAllowList)
                 let running = NSWorkspace.shared.runningApplications.compactMap { app -> DockRunningApp? in
@@ -286,9 +302,8 @@ final class ClickListener {
                     return DockRunningApp(bundleID: id, urlString: bundleURL.absoluteString)
                 }
                 let target = matchingRunningBundleID(dockURLString: url, running: running)
-                let front = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
                 return DockClickSample(hostBundleID: host, role: role, subrole: subrole, targetBundleID: target,
-                                       frontmostBundleID: front, runningContainsTarget: target != nil,
+                                       frontmostBundleID: front, runningContainsTarget: target != nil, applicationRunning: true,
                                        hasModifier: dockModifiersHeld(flags), at: now)
             }
             guard allowsDockScopedAXRead(attribute: "AXParent", hostBundleID: owner) else { return nil }
@@ -509,7 +524,7 @@ final class AppController: NSObject, NSApplicationDelegate {
             let hints = history.recent(for: activeID)
             if hints.isEmpty {
                 stack.addArrangedSubview(label("클릭을 단축키로", size: 15, weight: .semibold))
-                stack.addArrangedSubview(label("메뉴, 창 버튼, Dock의 실행 중인 앱을 눌러 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
+                stack.addArrangedSubview(label("메뉴, 창 버튼, Dock 아이콘을 눌러 보세요. 다음에는 여기에 표시된 키로 실행할 수 있습니다.", color: .secondaryLabelColor))
                 stack.addArrangedSubview(label("Safari · Chrome · Finder\n창 버튼 · Dock 앱 전환 · 브라우저 도구 막대 일부", size: 12, color: .secondaryLabelColor))
             }
             for hint in hints {
@@ -518,7 +533,8 @@ final class AppController: NSObject, NSApplicationDelegate {
                 row.addArrangedSubview(label(hint.title, size: 13, weight: .medium))
                 row.addArrangedSubview(label(hint.shortcut ?? "단축키 미지정", size: hint.shortcut == nil ? 13 : 22,
                                             weight: .semibold, color: hint.shortcut == nil ? .secondaryLabelColor : .labelColor))
-                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : (hint.source == "dock" ? "Dock → 앱 전환" : "도구 막대 → 메뉴"))
+                let dockCaption = hint.title == dockLaunchTitle ? "Dock → Spotlight" : "Dock → 앱 전환"
+                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : (hint.source == "dock" ? dockCaption : "도구 막대 → 메뉴"))
                 row.addArrangedSubview(label(caption, size: 10, color: .secondaryLabelColor))
                 stack.addArrangedSubview(row)
             }

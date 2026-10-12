@@ -375,9 +375,10 @@ func resolveCommand(_ commands: [MenuCommand], aliases: [String]) -> MenuCommand
 
 // Dock switch: roles, bundle IDs, and file URLs only. No titles, AXValue, or screen text.
 // AXParent and AXURL are a scoped exception: Dock process, Dock-click path, in-memory compare only.
+// A stopped app icon reads AXIsApplicationRunning only. That path does not read a title or URL.
 // Policy: PLAN.md "Dock 앱 전환".
-let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent"]
-let axDockProcessOnlyAttributes: Set<String> = ["AXURL", "AXParent"]
+let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent", "AXIsApplicationRunning"]
+let axDockProcessOnlyAttributes: Set<String> = ["AXURL", "AXParent", "AXIsApplicationRunning"]
 
 func allowsDockScopedAXRead(attribute: String, hostBundleID: String) -> Bool {
     guard axDockReadAllowList.contains(attribute) else { return false }
@@ -404,6 +405,8 @@ struct DockClickSample: Equatable {
     var targetBundleID: String?
     var frontmostBundleID: String
     var runningContainsTarget: Bool
+    // False only when Dock reports AXIsApplicationRunning as false. No title or URL is read then.
+    var applicationRunning: Bool
     var hasModifier: Bool
     var at: Date
 }
@@ -425,6 +428,9 @@ enum DockSwitchVerdict: Equatable {
 let dockSwitchTitle = "앱 전환"
 // System Settings does not let a user rebind the app switcher, so ⌘⇥ is fixed.
 let dockSwitchShortcut = shortcutText(character: "", virtualKey: 48, glyph: nil, modifiers: 0) ?? "⌘ ⇥"
+// Spotlight's documented shortcut. A stopped Dock app launches; this hint is fixed.
+let dockLaunchTitle = "Spotlight"
+let dockLaunchShortcut = shortcutText(character: "", virtualKey: 49, glyph: nil, modifiers: 0) ?? "⌘ Space"
 let dockBundleID = "com.apple.dock"
 let shortcupBundleID = "com.shortcup.app"
 
@@ -442,6 +448,10 @@ func isIgnoredDockSubrole(_ subrole: String) -> Bool {
 
 func dockSwitchHint(appID: String, appName: String) -> Hint {
     Hint(appID: appID, appName: appName, title: dockSwitchTitle, shortcut: dockSwitchShortcut, source: "dock")
+}
+
+func dockLaunchHint(appID: String, appName: String) -> Hint {
+    Hint(appID: appID, appName: appName, title: dockLaunchTitle, shortcut: dockLaunchShortcut, source: "dock")
 }
 
 // Compare file URLs in memory. The path is never logged or written.
@@ -491,6 +501,23 @@ func dockSwitchDecision(click: DockClickSample, activation: DockActivationSample
     return .show
 }
 
+func dockLaunchDecision(click: DockClickSample, activation: DockActivationSample,
+                        lastHintAt: Date?, settings: DockSwitchSettings = .standard) -> DockSwitchVerdict {
+    guard settings.enabled else { return .ignore }
+    guard !click.hasModifier, !activation.viaKeyboard else { return .ignore }
+    guard isDockBundleID(click.hostBundleID) else { return .ignore }
+    guard !isIgnoredDockSubrole(click.subrole) else { return .ignore }
+    guard isDockApplicationItem(role: click.role, subrole: click.subrole) else { return .ignore }
+    guard !click.applicationRunning else { return .ignore }
+    guard !isShortcupBundleID(activation.bundleID) else { return .ignore }
+    guard abs(activation.at.timeIntervalSince(click.at)) <= settings.correlationWindow else { return .ignore }
+    if let last = lastHintAt {
+        let sinceHint = min(abs(activation.at.timeIntervalSince(last)), abs(click.at.timeIntervalSince(last)))
+        if sinceHint < settings.cooldown { return .ignore }
+    }
+    return .show
+}
+
 struct DockSwitchCorrelator: Equatable {
     var settings: DockSwitchSettings = .standard
     var pendingClick: DockClickSample?
@@ -500,12 +527,14 @@ struct DockSwitchCorrelator: Equatable {
     mutating func noteClick(_ click: DockClickSample, now: Date) -> Hint? {
         expire(now: now)
         pendingClick = click
+        if !click.applicationRunning { return finishLaunch(now: now) }
         return match(now: now)
     }
 
     mutating func noteActivation(_ activation: DockActivationSample, now: Date) -> Hint? {
         expire(now: now)
         pendingActivation = activation
+        if pendingClick?.applicationRunning == false { return finishLaunch(now: now) }
         return match(now: now)
     }
 
@@ -518,6 +547,15 @@ struct DockSwitchCorrelator: Equatable {
         if let act = pendingActivation, now.timeIntervalSince(act.at) > settings.correlationWindow {
             pendingActivation = nil
         }
+    }
+
+    private mutating func finishLaunch(now: Date) -> Hint? {
+        guard let click = pendingClick, let act = pendingActivation, !click.applicationRunning else { return nil }
+        pendingClick = nil
+        pendingActivation = nil
+        guard dockLaunchDecision(click: click, activation: act, lastHintAt: lastHintAt, settings: settings) == .show else { return nil }
+        lastHintAt = now
+        return dockLaunchHint(appID: act.bundleID, appName: act.appName)
     }
 
     private mutating func match(now: Date) -> Hint? {
