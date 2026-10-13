@@ -375,9 +375,10 @@ func resolveCommand(_ commands: [MenuCommand], aliases: [String]) -> MenuCommand
 
 // Dock switch: roles, bundle IDs, and file URLs only. No titles, AXValue, or screen text.
 // AXParent and AXURL are a scoped exception: Dock process, Dock-click path, in-memory compare only.
+// A stopped app icon reads AXIsApplicationRunning. When that is false, AXURL is read only to resolve the bundle id. No title.
 // Policy: PLAN.md "Dock 앱 전환".
-let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent"]
-let axDockProcessOnlyAttributes: Set<String> = ["AXURL", "AXParent"]
+let axDockReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXURL", "AXParent", "AXIsApplicationRunning"]
+let axDockProcessOnlyAttributes: Set<String> = ["AXURL", "AXParent", "AXIsApplicationRunning"]
 
 func allowsDockScopedAXRead(attribute: String, hostBundleID: String) -> Bool {
     guard axDockReadAllowList.contains(attribute) else { return false }
@@ -388,8 +389,9 @@ func allowsDockScopedAXRead(attribute: String, hostBundleID: String) -> Bool {
 struct DockSwitchSettings: Equatable {
     var enabled: Bool
     var correlationWindow: TimeInterval
+    var launchWindow: TimeInterval
     var cooldown: TimeInterval
-    static let standard = DockSwitchSettings(enabled: true, correlationWindow: 0.8, cooldown: 12)
+    static let standard = DockSwitchSettings(enabled: true, correlationWindow: 0.8, launchWindow: 3, cooldown: 12)
 }
 
 struct DockRunningApp: Equatable {
@@ -404,6 +406,8 @@ struct DockClickSample: Equatable {
     var targetBundleID: String?
     var frontmostBundleID: String
     var runningContainsTarget: Bool
+    // False only when Dock reports AXIsApplicationRunning as false. Title is not read.
+    var applicationRunning: Bool
     var hasModifier: Bool
     var at: Date
 }
@@ -415,6 +419,10 @@ struct DockActivationSample: Equatable {
     // unmatched Dock click is cleared and does not stay pending.
     var viaKeyboard: Bool
     var at: Date
+    // Set from NSRunningApplication.launchDate. Nil is not a new launch.
+    var launchDate: Date?
+    // True only for NSWorkspace.didLaunchApplication.
+    var freshLaunch: Bool
 }
 
 enum DockSwitchVerdict: Equatable {
@@ -425,6 +433,14 @@ enum DockSwitchVerdict: Equatable {
 let dockSwitchTitle = "앱 전환"
 // System Settings does not let a user rebind the app switcher, so ⌘⇥ is fixed.
 let dockSwitchShortcut = shortcutText(character: "", virtualKey: 48, glyph: nil, modifiers: 0) ?? "⌘ ⇥"
+// Symbolic hotkey 64 is Spotlight. The shortcut is read locally; it is not fixed.
+let dockLaunchTitle = "Spotlight"
+let spotlightSymbolicHotKeyID = "64"
+let spotlightHotKeysDomain = "com.apple.symbolichotkeys"
+// Apple's Spotlight default when key 64 was never written. Virtual key 49 is Space.
+let defaultSpotlightShortcut = shortcutText(character: "", virtualKey: 49, glyph: nil, modifiers: 0) ?? "⌘ Space"
+// Activations this far before the click are event-order races, not earlier launches.
+let dockLaunchSkew: TimeInterval = 0.05
 let dockBundleID = "com.apple.dock"
 let shortcupBundleID = "com.shortcup.app"
 
@@ -444,6 +460,93 @@ func dockSwitchHint(appID: String, appName: String) -> Hint {
     Hint(appID: appID, appName: appName, title: dockSwitchTitle, shortcut: dockSwitchShortcut, source: "dock")
 }
 
+func dockLaunchHint(appID: String, appName: String, shortcut: String) -> Hint {
+    Hint(appID: appID, appName: appName, title: dockLaunchTitle, shortcut: shortcut, source: "dock")
+}
+
+// Carbon modifier bits used by symbolic hotkeys. Command is 1 << 20.
+func axMenuModifiers(carbon: Int) -> Int {
+    var mods = 0
+    if carbon & (1 << 17) != 0 { mods |= 1 }
+    if carbon & (1 << 19) != 0 { mods |= 2 }
+    if carbon & (1 << 18) != 0 { mods |= 4 }
+    if carbon & (1 << 20) == 0 { mods |= 8 }
+    return mods
+}
+
+func symbolicEnabled(_ value: Any?) -> Bool? {
+    if let flag = value as? Bool { return flag }
+    if let flag = value as? Int { return flag != 0 }
+    if let flag = value as? NSNumber { return flag.intValue != 0 }
+    return nil
+}
+
+func symbolicInt(_ value: Any?) -> Int? {
+    if let number = value as? Int { return number }
+    if let number = value as? NSNumber { return number.intValue }
+    return nil
+}
+
+func symbolicDictionary(_ value: Any?) -> [String: Any]? {
+    if let dict = value as? [String: Any] { return dict }
+    guard let dict = value as? NSDictionary else { return nil }
+    var copy: [String: Any] = [:]
+    for key in dict.allKeys {
+        guard let key = key as? String else { return nil }
+        copy[key] = dict[key]
+    }
+    return copy
+}
+
+func symbolicParameterList(_ value: Any?) -> [Int]? {
+    if let numbers = value as? [Int], numbers.count >= 3 { return numbers }
+    if let numbers = value as? [NSNumber], numbers.count >= 3 { return numbers.map(\.intValue) }
+    guard let list = value as? NSArray, list.count >= 3 else { return nil }
+    let numbers = list.compactMap { symbolicInt($0) }
+    return numbers.count >= 3 ? numbers : nil
+}
+
+// Key 64 entry: enabled plus value.parameters [character, key code, modifiers].
+// Disabled or not parseable returns nil. A missing entry is handled by spotlightShortcut(hotkeys:).
+func spotlightShortcut(symbolicHotKey entry: [String: Any]?) -> String? {
+    guard let entry, symbolicEnabled(entry["enabled"]) == true else { return nil }
+    guard let value = symbolicDictionary(entry["value"]),
+          let parameters = symbolicParameterList(value["parameters"]) else { return nil }
+    let keyCode = parameters[1]
+    let mods = axMenuModifiers(carbon: parameters[2])
+    if keyCode > 0, let text = shortcutText(character: "", virtualKey: keyCode, glyph: nil, modifiers: mods) {
+        return text
+    }
+    let characterCode = parameters[0]
+    guard (32...126).contains(characterCode), let scalar = UnicodeScalar(characterCode) else { return nil }
+    let character = Character(scalar)
+    guard character.isLetter || character.isNumber else { return nil }
+    return shortcutText(character: String(character), virtualKey: nil, glyph: nil, modifiers: mods)
+}
+
+func spotlightShortcut(hotkeys: [String: Any]?) -> String? {
+    guard let hotkeys, let raw = hotkeys[spotlightSymbolicHotKeyID] else { return defaultSpotlightShortcut }
+    return spotlightShortcut(symbolicHotKey: symbolicDictionary(raw))
+}
+
+func readSpotlightShortcut() -> String? {
+    _ = CFPreferencesAppSynchronize(spotlightHotKeysDomain as CFString)
+    let raw = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString, spotlightHotKeysDomain as CFString)
+    return spotlightShortcut(hotkeys: symbolicDictionary(raw))
+}
+
+enum SpotlightBinding: Equatable {
+    case local
+    case known(String?)
+}
+
+func resolvedSpotlightShortcut(_ binding: SpotlightBinding) -> String? {
+    switch binding {
+    case .local: return readSpotlightShortcut()
+    case .known(let shortcut): return shortcut
+    }
+}
+
 // Compare file URLs in memory. The path is never logged or written.
 func standardizedAppPath(_ raw: String) -> String? {
     let url: URL
@@ -459,6 +562,13 @@ func standardizedAppPath(_ raw: String) -> String? {
     while path.hasSuffix("/") { path.removeLast() }
     guard path.lowercased().hasSuffix(".app") else { return nil }
     return path.lowercased()
+}
+
+func appBundleID(at raw: String?) -> String? {
+    guard let raw, standardizedAppPath(raw) != nil else { return nil }
+    let url = raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : URL(string: raw)
+    guard let url, url.isFileURL else { return nil }
+    return Bundle(url: url)?.bundleIdentifier
 }
 
 // Reuse bundle URL → bundle id while the running pid set is unchanged.
@@ -505,20 +615,56 @@ func dockSwitchDecision(click: DockClickSample, activation: DockActivationSample
     return .show
 }
 
+func confirmsNewLaunch(_ activation: DockActivationSample, click: DockClickSample) -> Bool {
+    if activation.freshLaunch { return true }
+    guard let launchDate = activation.launchDate else { return false }
+    return launchDate.timeIntervalSince(click.at) >= -dockLaunchSkew
+}
+
+func dockLaunchDecision(click: DockClickSample, activation: DockActivationSample,
+                        lastHintAt: Date?, settings: DockSwitchSettings = .standard) -> DockSwitchVerdict {
+    guard settings.enabled else { return .ignore }
+    guard !click.hasModifier, !activation.viaKeyboard else { return .ignore }
+    guard isDockBundleID(click.hostBundleID) else { return .ignore }
+    guard !isIgnoredDockSubrole(click.subrole) else { return .ignore }
+    guard isDockApplicationItem(role: click.role, subrole: click.subrole) else { return .ignore }
+    guard !click.applicationRunning else { return .ignore }
+    guard let target = click.targetBundleID, !target.isEmpty, !isShortcupBundleID(target),
+          activation.bundleID == target else { return .ignore }
+    guard confirmsNewLaunch(activation, click: click) else { return .ignore }
+    let sinceClick = activation.at.timeIntervalSince(click.at)
+    guard sinceClick >= -dockLaunchSkew, sinceClick <= settings.launchWindow else { return .ignore }
+    if let last = lastHintAt,
+       min(click.at.timeIntervalSince(last), activation.at.timeIntervalSince(last)) < settings.cooldown {
+        return .ignore
+    }
+    return .show
+}
+
 struct DockSwitchCorrelator: Equatable {
     var settings: DockSwitchSettings = .standard
     var pendingClick: DockClickSample?
     var pendingActivation: DockActivationSample?
     var lastHintAt: Date?
+    var spotlightBinding: SpotlightBinding = .local
 
     mutating func noteClick(_ click: DockClickSample, now: Date) -> Hint? {
         expire(now: now)
         pendingClick = click
+        if !click.applicationRunning { return finishLaunch(now: now) }
         return match(now: now)
     }
 
     mutating func noteActivation(_ activation: DockActivationSample, now: Date) -> Hint? {
         expire(now: now)
+        if pendingClick?.applicationRunning == false {
+            pendingActivation = activation
+            return finishLaunch(now: now)
+        }
+        if activation.freshLaunch {
+            pendingActivation = activation
+            return nil
+        }
         pendingActivation = activation
         return match(now: now)
     }
@@ -526,12 +672,25 @@ struct DockSwitchCorrelator: Equatable {
     mutating func cancelClick() { pendingClick = nil }
 
     mutating func expire(now: Date) {
-        if let click = pendingClick, now.timeIntervalSince(click.at) > settings.correlationWindow {
-            pendingClick = nil
+        if let click = pendingClick {
+            let window = click.applicationRunning ? settings.correlationWindow : settings.launchWindow
+            if now.timeIntervalSince(click.at) > window { pendingClick = nil }
         }
         if let act = pendingActivation, now.timeIntervalSince(act.at) > settings.correlationWindow {
             pendingActivation = nil
         }
+    }
+
+    private mutating func finishLaunch(now: Date) -> Hint? {
+        guard let click = pendingClick, let act = pendingActivation, !click.applicationRunning else { return nil }
+        guard confirmsNewLaunch(act, click: click) else { return nil }
+        guard act.bundleID == click.targetBundleID else { return nil }
+        pendingClick = nil
+        pendingActivation = nil
+        guard let shortcut = resolvedSpotlightShortcut(spotlightBinding),
+              dockLaunchDecision(click: click, activation: act, lastHintAt: lastHintAt, settings: settings) == .show else { return nil }
+        lastHintAt = now
+        return dockLaunchHint(appID: act.bundleID, appName: act.appName, shortcut: shortcut)
     }
 
     private mutating func match(now: Date) -> Hint? {
