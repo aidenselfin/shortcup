@@ -415,7 +415,7 @@ struct DockClickSample: Equatable {
 struct DockActivationSample: Equatable {
     var bundleID: String
     var appName: String
-    // Production always passes false. Cmd+Tab is excluded because an ignored or
+    // Test-only. Production always passes false. Cmd+Tab is excluded because an ignored or
     // unmatched Dock click is cleared and does not stay pending.
     var viaKeyboard: Bool
     var at: Date
@@ -569,6 +569,20 @@ func appBundleID(at raw: String?) -> String? {
     let url = raw.hasPrefix("/") ? URL(fileURLWithPath: raw) : URL(string: raw)
     guard let url, url.isFileURL else { return nil }
     return Bundle(url: url)?.bundleIdentifier
+}
+
+// Reuse bundle URL → bundle id while the running pid set is unchanged.
+struct DockBundleURLCache {
+    private var pids: [Int]?
+    private var cached: [DockRunningApp] = []
+
+    mutating func apps(pids: [Int], load: () -> [DockRunningApp]) -> [DockRunningApp] {
+        let next = pids.sorted()
+        if self.pids == next { return cached }
+        self.pids = next
+        cached = load()
+        return cached
+    }
 }
 
 func matchingRunningBundleID(dockURLString: String?, running: [DockRunningApp]) -> String? {

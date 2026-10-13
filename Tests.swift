@@ -270,6 +270,15 @@ private func runDockSwitchChecks() {
     assert(standardizedAppPath("/Applications/Safari.app") == "/applications/safari.app")
     assert(standardizedAppPath("file:///Applications/Safari.app/Contents") == nil)
     assert(standardizedAppPath("https://example.invalid/Safari.app") == nil)
+    var bundleLoads = 0
+    var bundleCache = DockBundleURLCache()
+    let cachedRunning = bundleCache.apps(pids: [7, 3]) { bundleLoads += 1; return running }
+    assert(bundleLoads == 1)
+    assert(bundleCache.apps(pids: [3, 7]) { bundleLoads += 1; return [] } == cachedRunning)
+    assert(bundleLoads == 1)
+    assert(bundleCache.apps(pids: [3]) { bundleLoads += 1; return [] }.isEmpty)
+    assert(bundleLoads == 2)
+    assert(matchingRunningBundleID(dockURLString: "file:///Applications/Safari.app/", running: cachedRunning) == "com.apple.Safari")
     assert(matchingRunningBundleID(dockURLString: "file:///Applications/Safari.app/", running: running) == "com.apple.Safari")
     assert(matchingRunningBundleID(dockURLString: "file:///Applications/Notes.app/", running: running) == nil)
     assert(matchingRunningBundleID(dockURLString: nil, running: running) == nil)
