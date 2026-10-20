@@ -89,6 +89,8 @@ jobs:
                   "running", "windowCount", "tabStrip", "toolbar", "chrome",
                   "truncated", "axError", "role", "subrole", "depth", "index",
                   "children", "greenButton", "plain", "option",
+                  "plainAlternate", "optionAlternate",
+              }
               }
               safe = re.compile(
                   r"^(AX[A-Za-z0-9]+|ok|trusted=false|safari-not-running|"

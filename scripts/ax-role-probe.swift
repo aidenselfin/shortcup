@@ -214,10 +214,10 @@ func postOption(down: Bool) {
         changed.flags = flags
         changed.post(tap: .cghidEventTap)
     }
-    if let key = CGEvent(keyboardEventSource: source, virtualKey: kVKOption, keyDown: down) {
-        key.flags = flags
-        key.post(tap: .cghidEventTap)
-    }
+}
+
+func alternateDown() -> Bool {
+    CGEventSource.flagsState(.hidSystemState).contains(.maskAlternate)
 }
 
 func greenButtonSubroles(_ window: AXUIElement) -> [String: Any]? {
@@ -227,13 +227,17 @@ func greenButtonSubroles(_ window: AXUIElement) -> [String: Any]? {
     Thread.sleep(forTimeInterval: 0.2)
     postOption(down: false)
     let plain = axSubrole(button)
+    let plainAlternate = alternateDown()
     postOption(down: true)
     defer { postOption(down: false) }
     Thread.sleep(forTimeInterval: 0.4)
     let option = axSubrole(button)
+    let optionAlternate = alternateDown()
     return [
         "plain": plain as Any? ?? NSNull(),
         "option": option as Any? ?? NSNull(),
+        "plainAlternate": plainAlternate,
+        "optionAlternate": optionAlternate,
     ]
 }
 
