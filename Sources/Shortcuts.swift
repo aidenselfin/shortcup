@@ -716,4 +716,56 @@ struct HintHistory {
         hints = Array(hints.prefix(30))
     }
     func recent(for appID: String) -> [Hint] { Array(hints.filter { $0.appID == appID }.prefix(3)) }
+    mutating func removeKind(_ key: String) { hints.removeAll { HintGate.key(for: $0) == key } }
+}
+
+// One gate where hints are shown. Same 12s Dock already uses. Keyed by shortcut, or source+title when there is no shortcut.
+// Muted keys are the only thing written down. Timestamps stay in memory.
+struct HintGate: Equatable {
+    static let cooldown = DockSwitchSettings.standard.cooldown
+    static let defaultsKey = "mutedHintKinds"
+    var shownAt: [String: Date] = [:]
+    var muted: Set<String> = []
+    var names: [String: String] = [:]
+
+    static func key(for hint: Hint) -> String {
+        if let shortcut = hint.shortcut, !shortcut.isEmpty { return shortcut }
+        return hint.source + "\t" + hint.title
+    }
+
+    static func fallbackLabel(_ key: String) -> String {
+        guard let tab = key.firstIndex(of: "\t") else { return key }
+        let source = String(key[..<tab])
+        let title = String(key[key.index(after: tab)...])
+        let place: String
+        switch source {
+        case "menu": place = "메뉴"
+        case "window": place = "창 버튼"
+        case "dock": place = "Dock"
+        case "toolbar": place = "도구 막대"
+        default: place = source
+        }
+        return title.isEmpty ? place : "\(place) · \(title)"
+    }
+
+    static func menuTitle(_ hint: Hint) -> String {
+        if let shortcut = hint.shortcut, !shortcut.isEmpty { return "\(hint.title)  \(shortcut)" }
+        return fallbackLabel(key(for: hint))
+    }
+
+    func menuLabel(for key: String) -> String { names[key] ?? Self.fallbackLabel(key) }
+    func kinds() -> [String] { (Set(shownAt.keys).union(muted)).sorted() }
+
+    mutating func setMuted(_ key: String, muted off: Bool) {
+        if off { muted.insert(key) } else { muted.remove(key); shownAt.removeValue(forKey: key) }
+    }
+
+    mutating func allow(_ hint: Hint, now: Date) -> Bool {
+        let key = Self.key(for: hint)
+        names[key] = Self.menuTitle(hint)
+        if muted.contains(key) { return false }
+        if let last = shownAt[key], now.timeIntervalSince(last) < Self.cooldown { return false }
+        shownAt[key] = now
+        return true
+    }
 }

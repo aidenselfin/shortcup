@@ -343,9 +343,11 @@ final class HintPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 }
 
-final class AppController: NSObject, NSApplicationDelegate {
+final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let listener = ClickListener()
     private var history = HintHistory()
+    private var gate = HintGate()
+    private var hintMenu: NSMenu?
     private var activeID = ""
     private var activeName = "앱"
     private var panel: HintPanel!
@@ -373,6 +375,7 @@ final class AppController: NSObject, NSApplicationDelegate {
     var validationPaused: Bool { paused }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        gate.muted = Set(UserDefaults.standard.stringArray(forKey: HintGate.defaultsKey) ?? [])
         armAXTimeout()
         if CommandLine.arguments.contains("--dump-window-menu-ids") {
             dumpWindowMenuIDs()
@@ -399,10 +402,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         #endif
         listener.onHint = { [weak self] hint in
             guard let self else { return }
-            self.history.add(hint)
-            self.activeID = hint.appID; self.activeName = hint.appName
-            self.record(hint)
-            self.render()
+            if self.present(hint) { self.render() }
         }
         listener.onStatus = { [weak self] message in self?.monitorError = message; self?.render() }
         if logURL != nil { listener.onProbe = { [weak self] message in self?.validationProbe = message } }
@@ -575,6 +575,12 @@ final class AppController: NSObject, NSApplicationDelegate {
         toggle.target = self
         let pause = menu.addItem(withTitle: "감지 일시정지 / 재개", action: #selector(togglePause), keyEquivalent: "")
         pause.target = self
+        let hintsItem = menu.addItem(withTitle: "힌트 표시", action: nil, keyEquivalent: "")
+        let hintsMenu = NSMenu()
+        hintsMenu.autoenablesItems = false
+        hintsMenu.delegate = self
+        hintMenu = hintsMenu
+        hintsItem.submenu = hintsMenu
         let permission = menu.addItem(withTitle: "접근성 설정", action: #selector(openPermission), keyEquivalent: "")
         permission.target = self
         menu.addItem(.separator())
@@ -625,7 +631,7 @@ final class AppController: NSObject, NSApplicationDelegate {
         let id = app.bundleIdentifier ?? ""
         let name = app.localizedName ?? "앱"
         if let hint = listener.noteDockActivation(bundleID: id, appName: name, launchDate: app.launchDate, freshLaunch: freshLaunch) {
-            history.add(hint)
+            present(hint)
         }
     }
     @objc private func launched(_ notification: Notification) {
@@ -647,6 +653,53 @@ final class AppController: NSObject, NSApplicationDelegate {
         if hidden { panel.orderOut(nil) } else { positionPanel(); panel.orderFrontRegardless() }
     }
     @objc func togglePause() { paused.toggle(); listener.setPaused(paused); render() }
+
+    private var hintGateEnabled: Bool {
+        !validation && !CommandLine.arguments.contains("--validate-once")
+    }
+
+    @discardableResult
+    private func present(_ hint: Hint) -> Bool {
+        if hintGateEnabled {
+            guard gate.allow(hint, now: Date()) else { return false }
+        }
+        history.add(hint)
+        activeID = hint.appID
+        activeName = hint.appName
+        record(hint)
+        return true
+    }
+
+    private func saveMutedHints() {
+        UserDefaults.standard.set(gate.muted.sorted(), forKey: HintGate.defaultsKey)
+    }
+
+    @objc func menuNeedsUpdate(_ menu: NSMenu) {
+        guard let hintMenu, menu === hintMenu else { return }
+        menu.removeAllItems()
+        let keys = gate.kinds()
+        if keys.isEmpty {
+            let empty = menu.addItem(withTitle: "아직 표시한 힌트 없음", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            return
+        }
+        for key in keys {
+            let item = menu.addItem(withTitle: gate.menuLabel(for: key), action: #selector(toggleHintKind(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = gate.muted.contains(key) ? .off : .on
+            item.representedObject = key
+        }
+    }
+
+    @objc private func toggleHintKind(_ sender: NSMenuItem) {
+        guard let key = sender.representedObject as? String else { return }
+        let off = !gate.muted.contains(key)
+        gate.setMuted(key, muted: off)
+        if off { history.removeKind(key) }
+        saveMutedHints()
+        render()
+    }
+
     @objc private func quitApp() { NSApp.terminate(nil) }
     @objc private func openPermission() {
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
