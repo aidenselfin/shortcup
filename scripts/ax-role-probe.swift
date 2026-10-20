@@ -186,11 +186,23 @@ func axElement(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
     return (value as! AXUIElement)
 }
 
+func axPoint(_ element: AXUIElement) -> CGPoint? {
+    let (_, value) = axCopy(element, kAXPositionAttribute as CFString)
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else { return nil }
+    return point
+}
+
 func greenButton(_ window: AXUIElement) -> AXUIElement? {
     let lights = axChildren(window, budget: NodeBudget(16)).filter {
         axRole($0) == "AXButton" && trafficLights.contains(axSubrole($0) ?? "")
     }
-    if lights.count >= 3 { return lights[2] }
+    let ranked = lights.compactMap { el -> (AXUIElement, CGFloat)? in
+        guard let point = axPoint(el) else { return nil }
+        return (el, point.x)
+    }.sorted { $0.1 < $1.1 }
+    if ranked.count >= 3 { return ranked[2].0 }
     return axElement(window, "AXFullScreenButton") ?? axElement(window, "AXZoomButton")
 }
 
