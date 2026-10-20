@@ -174,10 +174,10 @@ private struct FinderBox {
     mutating func populate(_ element: AXUIElement, depth: Int) {
         if depth > finderToolbarDepthLimit || visited.count >= finderToolbarNodeCap { return }
         finderSetTimeout(element)
-        let id = id(of: element)
-        guard visited.insert(id).inserted else { return }
-        let role = nodes[id]?.role ?? finderRole(element)
-        if nodes[id] == nil { nodes[id] = FinderAXNode(role: role) }
+        let nodeID = id(of: element)
+        guard visited.insert(nodeID).inserted else { return }
+        let role = nodes[nodeID]?.role ?? finderRole(element)
+        if nodes[nodeID] == nil { nodes[nodeID] = FinderAXNode(role: role) }
         if finderToolbarSkipsChildren(role) || !finderToolbarPairRole(role) { return }
         guard let kids = finderChildren(element) else { return }
         link(parent: element, children: kids)
