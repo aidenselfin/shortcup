@@ -477,6 +477,10 @@ private func runFinderToolbarChecks() {
     for name in ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", "AXMenuItemCmdVirtualKey", "AXMenuItemCmdGlyph", "AXTitle", "AXEnabled", "AXMenuBar"] {
         assert(axWindowReadAllowList.contains(name))
     }
+    assert(finderMenuOpensChildren(role: "AXMenu", depth: 0))
+    assert(!finderMenuOpensChildren(role: "AXMenu", depth: 1))
+    assert(!finderMenuOpensChildren(role: "AXMenuItem", depth: 0))
+    assert(!finderMenuOpensChildren(role: "AXMenuItem", depth: 1))
 
     let direct: [String: FinderAXNode] = [
         "toolbar": finderNode("AXToolbar", children: ["back", "forward", "view"]),

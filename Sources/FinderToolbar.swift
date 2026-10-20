@@ -217,6 +217,11 @@ private func menuChildren(_ element: AXUIElement) -> [AXUIElement] {
     return children
 }
 
+// Menu items are not opened. Recent Folders and other submenus are not read.
+func finderMenuOpensChildren(role: String, depth: Int) -> Bool {
+    role != "AXMenuItem" && depth < 1
+}
+
 private func finderMenuCommands(_ app: AXUIElement) -> [MenuCommand] {
     guard let bar = axAllowedElement(app, AXAttr.menuBar, allow: axWindowReadAllowList) else { return [] }
     finderSetTimeout(bar)
@@ -224,26 +229,32 @@ private func finderMenuCommands(_ app: AXUIElement) -> [MenuCommand] {
     var commands: [MenuCommand] = []
     var seen = 0
     let deadline = Date().addingTimeInterval(finderMenuSeconds)
+    func both() -> Bool {
+        resolveCommand(commands, aliases: finderBackAliases) != nil
+            && resolveCommand(commands, aliases: finderForwardAliases) != nil
+    }
     for top in menuChildren(bar) {
-        if seen >= finderMenuNodeCap || Date() >= deadline { break }
+        if seen >= finderMenuNodeCap || Date() >= deadline || both() { break }
         finderSetTimeout(top)
         seen += 1
         guard finderGoMenus.contains(normalized(axAllowedString(top, AXAttr.title, allow: axWindowReadAllowList))) else { continue }
         var pending = menuChildren(top).map { ($0, 0) }
         var index = 0
-        while index < pending.count && seen < finderMenuNodeCap && Date() < deadline {
+        while index < pending.count && seen < finderMenuNodeCap && Date() < deadline && !both() {
             let (element, depth) = pending[index]
             index += 1
             finderSetTimeout(element)
             seen += 1
-            if axAllowedString(element, AXAttr.role, allow: axWindowReadAllowList) == "AXMenuItem" {
+            let role = axAllowedString(element, AXAttr.role, allow: axWindowReadAllowList)
+            if role == "AXMenuItem" {
                 let title = axAllowedString(element, AXAttr.title, allow: axWindowReadAllowList)
                 if names.contains(normalized(title)) {
                     let enabled = axAllowedBool(element, AXAttr.enabled, allow: axWindowReadAllowList) == true
                     commands.append(MenuCommand(title: title, shortcut: finderMenuItemShortcut(element), enabled: enabled))
                 }
+            } else if finderMenuOpensChildren(role: role, depth: depth) {
+                pending.append(contentsOf: menuChildren(element).map { ($0, depth + 1) })
             }
-            if depth < 2 { pending.append(contentsOf: menuChildren(element).map { ($0, depth + 1) }) }
         }
     }
     return commands
