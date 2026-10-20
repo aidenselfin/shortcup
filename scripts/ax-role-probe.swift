@@ -175,6 +175,79 @@ func encode(_ object: [String: Any]) throws -> Data {
     return data + Data([0x0A])
 }
 
+let trafficLights: Set<String> = [
+    "AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton",
+]
+let kVKOption: CGKeyCode = 58
+
+func axElement(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+    let (_, value) = axCopy(element, attribute as CFString)
+    guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+
+func axPoint(_ element: AXUIElement) -> CGPoint? {
+    let (_, value) = axCopy(element, kAXPositionAttribute as CFString)
+    guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+    var point = CGPoint.zero
+    guard AXValueGetValue(value as! AXValue, .cgPoint, &point) else { return nil }
+    return point
+}
+
+func greenButton(_ window: AXUIElement, childBudget: Int) -> AXUIElement? {
+    let lights = axChildren(window, budget: NodeBudget(childBudget)).filter {
+        axRole($0) == "AXButton" && trafficLights.contains(axSubrole($0) ?? "")
+    }
+    let ranked = lights.compactMap { el -> (AXUIElement, CGFloat)? in
+        guard let point = axPoint(el) else { return nil }
+        return (el, point.x)
+    }.sorted { $0.1 < $1.1 }
+    if ranked.count >= 3 { return ranked[2].0 }
+    return axElement(window, "AXFullScreenButton") ?? axElement(window, "AXZoomButton")
+}
+
+func postOption(down: Bool) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    if let changed = CGEvent(keyboardEventSource: source, virtualKey: kVKOption, keyDown: down) {
+        changed.type = .flagsChanged
+        changed.flags = down ? .maskAlternate : []
+        changed.post(tap: .cghidEventTap)
+    }
+}
+
+func alternateDown() -> Bool {
+    CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate)
+}
+
+func activateFinder(_ seconds: Double) {
+    NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+        .first?.activate()
+    Thread.sleep(forTimeInterval: seconds)
+}
+
+func reading(_ button: AXUIElement) -> [String: Any] {
+    [
+        "subrole": axSubrole(button) as Any? ?? NSNull(),
+        "maskAlternate": alternateDown(),
+    ]
+}
+
+func greenButtonSubroles(_ window: AXUIElement) -> [String: Any]? {
+    activateFinder(0.2)
+    var button = greenButton(window, childBudget: 16)
+    if button == nil {
+        activateFinder(0.5)
+        button = greenButton(window, childBudget: 64)
+    }
+    guard let button else { return nil }
+    postOption(down: false)
+    let plain = reading(button)
+    postOption(down: true)
+    defer { postOption(down: false) }
+    Thread.sleep(forTimeInterval: 0.4)
+    return ["plain": plain, "option": reading(button)]
+}
+
 guard CommandLine.arguments.count == 2 else {
     FileHandle.standardError.write(Data("usage: ax-role-probe OUTPUT.json\n".utf8))
     exit(2)
@@ -217,6 +290,9 @@ func probe(bundle: String, label: inout [String: Any], root pick: (AXUIElement, 
     if bundle == "com.apple.Safari", let strip = pick(window, budget) {
         label["tabStrip"] = nodeObject(dumpTree(strip, budget: budget))
     }
+    if bundle == "com.apple.finder", let green = greenButtonSubroles(window) {
+        label["greenButton"] = green
+    }
     label["truncated"] = budget.truncated
     return "ok"
 }
@@ -236,12 +312,15 @@ if reason == "ok" {
         reason = "no-tab-strip"
     } else if finder["toolbar"] == nil && finder["running"] as? Bool == true {
         reason = "no-toolbar"
+    } else if finder["greenButton"] == nil && finder["running"] as? Bool == true {
+        reason = "no-green-button"
     }
 }
 
 if safari["tabStrip"] == nil { safari["tabStrip"] = NSNull() }
 if safari["toolbar"] == nil { safari["toolbar"] = NSNull() }
 if finder["toolbar"] == nil { finder["toolbar"] = NSNull() }
+if finder["greenButton"] == nil { finder["greenButton"] = NSNull() }
 
 let report: [String: Any] = [
     "trusted": trusted,
