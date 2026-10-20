@@ -186,7 +186,7 @@ else
 fi
 
 /bin/mkdir -p build/product-link
-if /usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift \
+if /usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/FinderToolbar.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift \
     -o build/product-link/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon \
     > build/verify/product-link.log 2>&1; then
   if /usr/bin/grep -q 'will never be executed' build/verify/product-link.log; then

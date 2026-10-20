@@ -250,7 +250,7 @@ final class ClickListener {
                 if let hint = dock.noteClick(sample, now: now) {
                     DispatchQueue.main.async { self.onHint?(hint) }
                 }
-            } else if let hint = session.inspect(at: point) {
+            } else if let hint = finderToolbarHint(at: point, flags: flags) ?? session.inspect(at: point) {
                 candidate = (hint, point)
             }
         } else if type == .leftMouseDragged {
@@ -547,7 +547,7 @@ final class AppController: NSObject, NSApplicationDelegate {
                 row.addArrangedSubview(label(hint.shortcut ?? "단축키 미지정", size: hint.shortcut == nil ? 13 : 22,
                                             weight: .semibold, color: hint.shortcut == nil ? .secondaryLabelColor : .labelColor))
                 let dockCaption = hint.title == dockLaunchTitle ? "Dock → Spotlight" : "Dock → 앱 전환"
-                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : (hint.source == "dock" ? dockCaption : "도구 막대 → 메뉴"))
+                let caption = hint.source == "menu" ? "메뉴에서 확인" : (hint.source == "window" ? "창 버튼 → 메뉴" : (hint.source == "dock" ? dockCaption : (hint.source == "finder" ? "Finder 도구 막대" : "도구 막대 → 메뉴")))
                 row.addArrangedSubview(label(caption, size: 10, color: .secondaryLabelColor))
                 stack.addArrangedSubview(row)
             }
