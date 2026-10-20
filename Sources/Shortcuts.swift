@@ -716,56 +716,72 @@ struct HintHistory {
         hints = Array(hints.prefix(30))
     }
     func recent(for appID: String) -> [Hint] { Array(hints.filter { $0.appID == appID }.prefix(3)) }
-    mutating func removeKind(_ key: String) { hints.removeAll { HintGate.key(for: $0) == key } }
+    mutating func removeKind(_ key: String) { hints.removeAll { HintGate.muteKey(for: $0) == key } }
 }
 
-// One gate where hints are shown. Same 12s Dock already uses. Keyed by shortcut, or source+title when there is no shortcut.
-// Muted keys are the only thing written down. Timestamps stay in memory.
+// Same 12s Dock already uses. Cooldown is per app. Mute is the shortcut string only, and the only thing written down.
+// ponytail: mute stays shortcut-global; split it per app if one app's ⌘W should stay visible.
 struct HintGate: Equatable {
     static let cooldown = DockSwitchSettings.standard.cooldown
     static let defaultsKey = "mutedHintKinds"
+    static let shownCap = 30
     var shownAt: [String: Date] = [:]
     var muted: Set<String> = []
-    var names: [String: String] = [:]
 
-    static func key(for hint: Hint) -> String {
-        if let shortcut = hint.shortcut, !shortcut.isEmpty { return shortcut }
-        return hint.source + "\t" + hint.title
+    static func muteKey(for hint: Hint) -> String? {
+        guard let shortcut = hint.shortcut, !shortcut.isEmpty else { return nil }
+        return shortcut
     }
 
-    static func fallbackLabel(_ key: String) -> String {
-        guard let tab = key.firstIndex(of: "\t") else { return key }
-        let source = String(key[..<tab])
-        let title = String(key[key.index(after: tab)...])
-        let place: String
-        switch source {
-        case "menu": place = "메뉴"
-        case "window": place = "창 버튼"
-        case "dock": place = "Dock"
-        case "toolbar": place = "도구 막대"
-        default: place = source
+    static func cooldownKey(for hint: Hint) -> String {
+        if let shortcut = muteKey(for: hint) { return hint.appID + "\t" + shortcut }
+        return hint.appID + "\t" + hint.source + "\t" + hint.title
+    }
+
+    static func isShortcutKey(_ key: String) -> Bool { !key.isEmpty && !key.contains("\t") }
+
+    static func persistedKeys(_ muted: Set<String>) -> [String] { muted.filter(isShortcutKey).sorted() }
+
+    static func muted(from stored: [String]?) -> Set<String> { Set(persistedKeys(Set(stored ?? []))) }
+
+    static func shortcut(fromCooldownKey key: String) -> String? {
+        guard let tab = key.firstIndex(of: "\t") else { return nil }
+        let rest = key[key.index(after: tab)...]
+        guard !rest.isEmpty, !rest.contains("\t") else { return nil }
+        return String(rest)
+    }
+
+    func menuLabel(for key: String) -> String { key }
+
+    func kinds() -> [String] {
+        var keys = muted.filter(Self.isShortcutKey)
+        for key in shownAt.keys {
+            if let shortcut = Self.shortcut(fromCooldownKey: key) { keys.insert(shortcut) }
         }
-        return title.isEmpty ? place : "\(place) · \(title)"
+        return keys.sorted()
     }
-
-    static func menuTitle(_ hint: Hint) -> String {
-        if let shortcut = hint.shortcut, !shortcut.isEmpty { return "\(hint.title)  \(shortcut)" }
-        return fallbackLabel(key(for: hint))
-    }
-
-    func menuLabel(for key: String) -> String { names[key] ?? Self.fallbackLabel(key) }
-    func kinds() -> [String] { (Set(shownAt.keys).union(muted)).sorted() }
 
     mutating func setMuted(_ key: String, muted off: Bool) {
-        if off { muted.insert(key) } else { muted.remove(key); shownAt.removeValue(forKey: key) }
+        guard Self.isShortcutKey(key) else { return }
+        if off { muted.insert(key) }
+        else {
+            muted.remove(key)
+            shownAt = shownAt.filter { Self.shortcut(fromCooldownKey: $0.key) != key }
+        }
     }
 
     mutating func allow(_ hint: Hint, now: Date) -> Bool {
-        let key = Self.key(for: hint)
-        names[key] = Self.menuTitle(hint)
-        if muted.contains(key) { return false }
+        if let mute = Self.muteKey(for: hint), muted.contains(mute) { return false }
+        let key = Self.cooldownKey(for: hint)
         if let last = shownAt[key], now.timeIntervalSince(last) < Self.cooldown { return false }
         shownAt[key] = now
+        pruneShown()
         return true
+    }
+
+    private mutating func pruneShown() {
+        guard shownAt.count > Self.shownCap else { return }
+        let keep = Set(shownAt.sorted { $0.value > $1.value }.prefix(Self.shownCap).map(\.key))
+        shownAt = shownAt.filter { keep.contains($0.key) }
     }
 }

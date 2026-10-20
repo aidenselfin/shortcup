@@ -375,7 +375,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var validationPaused: Bool { paused }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        gate.muted = Set(UserDefaults.standard.stringArray(forKey: HintGate.defaultsKey) ?? [])
+        let storedMuted = UserDefaults.standard.stringArray(forKey: HintGate.defaultsKey) ?? []
+        gate.muted = HintGate.muted(from: storedMuted)
+        if storedMuted.sorted() != HintGate.persistedKeys(gate.muted) { saveMutedHints() }
         armAXTimeout()
         if CommandLine.arguments.contains("--dump-window-menu-ids") {
             dumpWindowMenuIDs()
@@ -631,7 +633,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let id = app.bundleIdentifier ?? ""
         let name = app.localizedName ?? "앱"
         if let hint = listener.noteDockActivation(bundleID: id, appName: name, launchDate: app.launchDate, freshLaunch: freshLaunch) {
-            present(hint)
+            present(hint) // may set activeID; updateActive() below follows the front app
         }
     }
     @objc private func launched(_ notification: Notification) {
@@ -671,7 +673,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func saveMutedHints() {
-        UserDefaults.standard.set(gate.muted.sorted(), forKey: HintGate.defaultsKey)
+        UserDefaults.standard.set(HintGate.persistedKeys(gate.muted), forKey: HintGate.defaultsKey)
     }
 
     @objc func menuNeedsUpdate(_ menu: NSMenu) {
