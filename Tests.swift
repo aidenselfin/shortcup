@@ -457,10 +457,26 @@ private func runFinderToolbarChecks() {
     assert(!axFinderToolbarReadAllowList.contains("AXURL"))
     assert(!axFinderToolbarReadAllowList.contains("AXValue"))
     assert(!axFinderToolbarReadAllowList.contains("AXIdentifier"))
-    assert(finderBackShortcut == "⌘ [")
-    assert(finderForwardShortcut == "⌘ ]")
-    assert(finderNavHint(.back, appName: "Finder") == Hint(appID: finderBundleID, appName: "Finder", title: "뒤로", shortcut: "⌘ [", source: "finder"))
-    assert(finderNavHint(.forward, appName: "Finder") == Hint(appID: finderBundleID, appName: "Finder", title: "앞으로", shortcut: "⌘ ]", source: "finder"))
+    let menu = [
+        MenuCommand(title: "Back", shortcut: "⌘ [", enabled: true),
+        MenuCommand(title: "Forward", shortcut: "⌘ ]", enabled: true)
+    ]
+    assert(finderNavHint(.back, commands: menu, appName: "Finder") == Hint(appID: finderBundleID, appName: "Finder", title: "뒤로", shortcut: "⌘ [", source: "finder"))
+    assert(finderNavHint(.forward, commands: menu, appName: "Finder") == Hint(appID: finderBundleID, appName: "Finder", title: "앞으로", shortcut: "⌘ ]", source: "finder"))
+    assert(finderNavHint(.back, commands: [MenuCommand(title: "뒤로", shortcut: "⌥⌘ [", enabled: true)], appName: "Finder")?.shortcut == "⌥⌘ [")
+    assert(finderNavHint(.forward, commands: [MenuCommand(title: "앞으로", shortcut: "⌥⌘ ]", enabled: true)], appName: "Finder")?.shortcut == "⌥⌘ ]")
+    assert(finderNavHint(.back, commands: [MenuCommand(title: "Back", shortcut: "⌘ [", enabled: false)], appName: "Finder") == nil)
+    assert(finderNavHint(.forward, commands: [MenuCommand(title: "Forward", shortcut: nil, enabled: true)], appName: "Finder") == nil)
+    assert(finderNavHint(.back, commands: [], appName: "Finder") == nil)
+    assert(finderNavHint(.back, commands: [MenuCommand(title: "Go Back", shortcut: "⌘ [", enabled: true)], appName: "Finder") == nil)
+    let ambiguous = [
+        MenuCommand(title: "Back", shortcut: "⌘ [", enabled: true),
+        MenuCommand(title: "뒤로", shortcut: "⌥⌘ [", enabled: true)
+    ]
+    assert(finderNavHint(.back, commands: ambiguous, appName: "Finder") == nil)
+    for name in ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", "AXMenuItemCmdVirtualKey", "AXMenuItemCmdGlyph", "AXTitle", "AXEnabled", "AXMenuBar"] {
+        assert(axWindowReadAllowList.contains(name))
+    }
 
     let direct: [String: FinderAXNode] = [
         "toolbar": finderNode("AXToolbar", children: ["back", "forward", "view"]),
@@ -594,6 +610,38 @@ private func runFinderToolbarChecks() {
     buried["deep"] = finderNode("AXButton", enabled: true, parent: parent)
     buried["deeper"] = finderNode("AXButton", enabled: true, parent: parent)
     assert(finderToolbarAction(hit: "deep", nodes: buried, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    var capped: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["branch"]),
+        "branch": finderNode("AXGroup", parent: "toolbar")
+    ]
+    var branchChildren: [String] = []
+    for index in 0..<finderToolbarChildCap {
+        let group = "g\(index)"
+        branchChildren.append(group)
+        if index < 7 {
+            let left = "a\(index)"
+            let right = "b\(index)"
+            capped[group] = finderNode("AXGroup", parent: "branch", children: [left, right])
+            capped[left] = finderNode("AXGroup", parent: group)
+            capped[right] = finderNode("AXGroup", parent: group)
+        } else if index == 7 {
+            capped[group] = finderNode("AXGroup", parent: "branch", children: ["pair"])
+            capped["pair"] = finderNode("AXGroup", parent: group, children: ["back", "forward"])
+            capped["back"] = finderNode("AXButton", enabled: true, parent: "pair")
+            capped["forward"] = finderNode("AXButton", enabled: true, parent: "pair")
+        } else {
+            capped[group] = finderNode("AXGroup", parent: "branch")
+        }
+    }
+    capped["branch"]?.children = branchChildren
+    let started = Date()
+    for _ in 0..<100 {
+        assert(finderToolbarAction(hit: "back", nodes: capped, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    }
+    let elapsed = Date().timeIntervalSince(started)
+    assert(elapsed < 0.25)
+    print(String(format: "finder-nav-walk-ms: %.3f (cap %d)", elapsed * 1000, finderToolbarNodeCap))
 }
 
 private func plant(_ world: SnapshotWorld, canary: String) {

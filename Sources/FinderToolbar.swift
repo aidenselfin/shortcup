@@ -1,15 +1,19 @@
 import AppKit
 import ApplicationServices
 
-// Finder toolbar Back and Forward. Apple documents these as ⌘[ and ⌘].
-// Match the first toolbar container (AXToolbar, AXGroup, or AXRadioGroup, depth <= 3)
-// whose only button children are exactly two AXButton or AXRadioButton values.
-// Child order is back, then forward. Titles, descriptions, URLs, and identifiers are not read.
+// Finder toolbar Back and Forward. Child order in the first two-button container is the click detector.
+// The hint is shown only when that command's menu item is enabled and has a shortcut.
+// The shortcut text is read from the menu item, not assumed. Toolbar titles are not read.
+// ponytail: only the Go / 이동 menu. Other locales show nothing until a menu title is added.
 let finderBundleID = "com.apple.finder"
 let axFinderToolbarReadAllowList: Set<String> = ["AXRole", "AXSubrole", "AXEnabled", "AXParent", "AXChildren"]
 let finderToolbarChildCap = 16
-let finderBackShortcut = shortcutText(character: "[", virtualKey: nil, glyph: nil, modifiers: 0) ?? "⌘ ["
-let finderForwardShortcut = shortcutText(character: "]", virtualKey: nil, glyph: nil, modifiers: 0) ?? "⌘ ]"
+private let finderBackAliases = ["back", "뒤로", "뒤로 이동"]
+private let finderForwardAliases = ["forward", "앞으로", "앞으로 이동"]
+private let finderGoMenus: Set<String> = ["go", "이동"]
+private let finderMenuNodeCap = 48
+private let finderMenuChildCap = 24
+private let finderMenuSeconds: TimeInterval = 0.25
 
 enum FinderNavButton: Equatable {
     case back
@@ -24,9 +28,10 @@ struct FinderAXNode: Equatable {
     var children: [String] = []
 }
 
+// ponytail: 32 nodes, depth 3, 8 ancestors. A wider toolbar needs a measured raise, not a bigger default.
+let finderToolbarNodeCap = 32
 private let finderToolbarWalkLimit = 8
 private let finderToolbarDepthLimit = 3
-private let finderToolbarNodeCap = 32
 
 private func isFinderNavButtonRole(_ role: String) -> Bool {
     role == "AXButton" || role == "AXRadioButton"
@@ -89,13 +94,11 @@ func finderToolbarAction(hit: String, nodes: [String: FinderAXNode], bundleID: S
     return index == 0 ? .back : .forward
 }
 
-func finderNavHint(_ action: FinderNavButton, appName: String) -> Hint {
-    switch action {
-    case .back:
-        return Hint(appID: finderBundleID, appName: appName, title: "뒤로", shortcut: finderBackShortcut, source: "finder")
-    case .forward:
-        return Hint(appID: finderBundleID, appName: appName, title: "앞으로", shortcut: finderForwardShortcut, source: "finder")
-    }
+func finderNavHint(_ action: FinderNavButton, commands: [MenuCommand], appName: String) -> Hint? {
+    let aliases = action == .back ? finderBackAliases : finderForwardAliases
+    guard let shortcut = resolveCommand(commands, aliases: aliases)?.shortcut else { return nil }
+    let title = action == .back ? "뒤로" : "앞으로"
+    return Hint(appID: finderBundleID, appName: appName, title: title, shortcut: shortcut, source: "finder")
 }
 
 private func finderSetTimeout(_ element: AXUIElement) {
@@ -197,8 +200,67 @@ private func finderAppName(_ element: AXUIElement) -> String {
     return name.isEmpty ? "Finder" : name
 }
 
+private func finderMenuItemShortcut(_ element: AXUIElement) -> String? {
+    let attributes: Set<String> = ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", "AXMenuItemCmdVirtualKey", "AXMenuItemCmdGlyph"]
+    guard axWindowReadAllowList.isSuperset(of: attributes) else { return nil }
+    return axWindowShortcut(element)
+}
+
+private func menuChildren(_ element: AXUIElement) -> [AXUIElement] {
+    guard axWindowReadAllowList.contains(AXAttr.children) else { return [] }
+    var count: CFIndex = 0
+    guard AXUIElementGetAttributeValueCount(element, kAXChildrenAttribute as CFString, &count) == .success, count > 0 else { return [] }
+    let n = min(Int(count), finderMenuChildCap)
+    var values: CFArray?
+    guard AXUIElementCopyAttributeValues(element, kAXChildrenAttribute as CFString, 0, n, &values) == .success,
+          let children = values as? [AXUIElement] else { return [] }
+    return children
+}
+
+private func finderMenuCommands(_ app: AXUIElement) -> [MenuCommand] {
+    guard let bar = axAllowedElement(app, AXAttr.menuBar, allow: axWindowReadAllowList) else { return [] }
+    finderSetTimeout(bar)
+    let names = Set((finderBackAliases + finderForwardAliases).map(normalized))
+    var commands: [MenuCommand] = []
+    var seen = 0
+    let deadline = Date().addingTimeInterval(finderMenuSeconds)
+    for top in menuChildren(bar) {
+        if seen >= finderMenuNodeCap || Date() >= deadline { break }
+        finderSetTimeout(top)
+        seen += 1
+        guard finderGoMenus.contains(normalized(axAllowedString(top, AXAttr.title, allow: axWindowReadAllowList))) else { continue }
+        var pending = menuChildren(top).map { ($0, 0) }
+        var index = 0
+        while index < pending.count && seen < finderMenuNodeCap && Date() < deadline {
+            let (element, depth) = pending[index]
+            index += 1
+            finderSetTimeout(element)
+            seen += 1
+            if axAllowedString(element, AXAttr.role, allow: axWindowReadAllowList) == "AXMenuItem" {
+                let title = axAllowedString(element, AXAttr.title, allow: axWindowReadAllowList)
+                if names.contains(normalized(title)) {
+                    let enabled = axAllowedBool(element, AXAttr.enabled, allow: axWindowReadAllowList) == true
+                    commands.append(MenuCommand(title: title, shortcut: finderMenuItemShortcut(element), enabled: enabled))
+                }
+            }
+            if depth < 2 { pending.append(contentsOf: menuChildren(element).map { ($0, depth + 1) }) }
+        }
+    }
+    return commands
+}
+
+private func finderConfirmedHint(_ action: FinderNavButton, hit: AXUIElement) -> Hint? {
+    var pid: pid_t = 0
+    guard AXUIElementGetPid(hit, &pid) == .success,
+          NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == finderBundleID else { return nil }
+    let app = AXUIElementCreateApplication(pid)
+    finderSetTimeout(app)
+    return finderNavHint(action, commands: finderMenuCommands(app), appName: finderAppName(hit))
+}
+
 func finderToolbarHint(at point: CGPoint, flags: CGEventFlags) -> Hint? {
     guard !dockModifiersHeld(flags) else { return nil }
+    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == finderBundleID else { return nil }
     let system = AXUIElementCreateSystemWide()
     finderSetTimeout(system)
     var hit: AXUIElement?
@@ -230,5 +292,5 @@ func finderToolbarHint(at point: CGPoint, flags: CGEventFlags) -> Hint? {
     let hitID = box.id(of: hit)
     box.populate(toolbar.element, depth: 0)
     guard let action = finderToolbarAction(hit: hitID, nodes: box.nodes, bundleID: finderBundleID, modifiersHeld: false) else { return nil }
-    return finderNavHint(action, appName: finderAppName(hit))
+    return finderConfirmedHint(action, hit: hit)
 }
