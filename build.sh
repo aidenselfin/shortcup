@@ -19,7 +19,7 @@ esac
 /bin/mkdir -p build/module-cache
 typeset -F SECONDS
 unit_started=$SECONDS
-/usr/bin/swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
+/usr/bin/swiftc -D SHORTCUP_CHECKS -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/FinderToolbar.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Tests.swift -o build/checks -framework AppKit -framework ApplicationServices -framework Carbon
 ./build/checks
 if [[ "$mode" == "product" ]]; then
   printf 'unit-tests-seconds: %.3f\n' $((SECONDS - unit_started))
@@ -31,7 +31,7 @@ fi
 if [[ "$mode" == "--dev" ]]; then
   /bin/mkdir -p "build/Shortcup Dev.app/Contents/MacOS"
   /usr/bin/swiftc -D SHORTCUP_DEV -module-cache-path build/module-cache \
-    Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Sources/SelfTest.swift \
+    Sources/Shortcuts.swift Sources/FinderToolbar.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift Sources/SelfTest.swift \
     -o "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" \
     -framework AppKit -framework ApplicationServices -framework Carbon
   minos="$(/usr/bin/vtool -show-build "build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" | /usr/bin/python3 scripts/vtool-minos.py)"
@@ -76,7 +76,7 @@ EOF
 fi
 /bin/mkdir -p build/Shortcup.app/Contents/MacOS
 app_started=$SECONDS
-/usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
+/usr/bin/swiftc -module-cache-path build/module-cache Sources/Shortcuts.swift Sources/FinderToolbar.swift Sources/Detect.swift Sources/App.swift Sources/Validation.swift -o build/Shortcup.app/Contents/MacOS/Shortcup -framework AppKit -framework ApplicationServices -framework Carbon
 minos="$(/usr/bin/vtool -show-build build/Shortcup.app/Contents/MacOS/Shortcup | /usr/bin/python3 scripts/vtool-minos.py)"
 [[ -n "$minos" ]]
 # Keep the checked-in plist in sync with the binary before copying it into the bundle.

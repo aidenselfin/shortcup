@@ -239,7 +239,8 @@ import Foundation
         assert(menuLocaleColumn(localeTable, language: "zh-Hans") == menuLocaleColumn(localeTable, language: "zh-Hans"))
         try replayFixtures()
         runDockSwitchChecks()
-        print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history, window button mapping, dock switch")
+        runFinderToolbarChecks()
+        print("PASS: shortcut formatting, conservative matching, disabled/unassigned commands, per-app deduplicated history, window button mapping, dock switch, finder back/forward")
         print("PASS: snapshot replay, glyph table, locale, cache, AX allow-list")
     }
 }
@@ -443,6 +444,208 @@ private func runDockSwitchChecks() {
     assert(otherApp.noteClick(stopped, now: t0) == nil)
     assert(otherApp.noteActivation(dockActivation(id: "com.apple.Safari", at: soon, launchDate: soon, freshLaunch: true), now: soon) == nil)
     assert(otherApp.noteActivation(born(soon.addingTimeInterval(0.2)), now: soon.addingTimeInterval(0.2))?.appID == "com.apple.Notes")
+}
+
+private func finderNode(_ role: String, subrole: String = "", enabled: Bool? = nil, parent: String? = nil, children: [String] = []) -> FinderAXNode {
+    FinderAXNode(role: role, subrole: subrole, enabled: enabled, parent: parent, children: children)
+}
+
+private func runFinderToolbarChecks() {
+    assert(axFinderToolbarReadAllowList == Set(["AXChildren", "AXEnabled", "AXParent", "AXRole", "AXSubrole"]))
+    assert(!axFinderToolbarReadAllowList.contains("AXTitle"))
+    assert(!axFinderToolbarReadAllowList.contains("AXDescription"))
+    assert(!axFinderToolbarReadAllowList.contains("AXURL"))
+    assert(!axFinderToolbarReadAllowList.contains("AXValue"))
+    assert(!axFinderToolbarReadAllowList.contains("AXIdentifier"))
+    let menu = [
+        MenuCommand(title: "Back", shortcut: "⌘ [", enabled: true),
+        MenuCommand(title: "Forward", shortcut: "⌘ ]", enabled: true)
+    ]
+    assert(finderNavHint(.back, commands: menu, appName: "Finder") == Hint(appID: finderBundleID, appName: "Finder", title: "뒤로", shortcut: "⌘ [", source: "finder"))
+    assert(finderNavHint(.forward, commands: menu, appName: "Finder") == Hint(appID: finderBundleID, appName: "Finder", title: "앞으로", shortcut: "⌘ ]", source: "finder"))
+    assert(finderNavHint(.back, commands: [MenuCommand(title: "뒤로", shortcut: "⌥⌘ [", enabled: true)], appName: "Finder")?.shortcut == "⌥⌘ [")
+    assert(finderNavHint(.forward, commands: [MenuCommand(title: "앞으로", shortcut: "⌥⌘ ]", enabled: true)], appName: "Finder")?.shortcut == "⌥⌘ ]")
+    assert(finderNavHint(.back, commands: [MenuCommand(title: "Back", shortcut: "⌘ [", enabled: false)], appName: "Finder") == nil)
+    assert(finderNavHint(.forward, commands: [MenuCommand(title: "Forward", shortcut: nil, enabled: true)], appName: "Finder") == nil)
+    assert(finderNavHint(.back, commands: [], appName: "Finder") == nil)
+    assert(finderNavHint(.back, commands: [MenuCommand(title: "Go Back", shortcut: "⌘ [", enabled: true)], appName: "Finder") == nil)
+    let ambiguous = [
+        MenuCommand(title: "Back", shortcut: "⌘ [", enabled: true),
+        MenuCommand(title: "뒤로", shortcut: "⌥⌘ [", enabled: true)
+    ]
+    assert(finderNavHint(.back, commands: ambiguous, appName: "Finder") == nil)
+    for name in ["AXMenuItemCmdChar", "AXMenuItemCmdModifiers", "AXMenuItemCmdVirtualKey", "AXMenuItemCmdGlyph", "AXTitle", "AXEnabled", "AXMenuBar"] {
+        assert(axWindowReadAllowList.contains(name))
+    }
+    assert(finderMenuOpensChildren(role: "AXMenu", depth: 0))
+    assert(!finderMenuOpensChildren(role: "AXMenu", depth: 1))
+    assert(!finderMenuOpensChildren(role: "AXMenuItem", depth: 0))
+    assert(!finderMenuOpensChildren(role: "AXMenuItem", depth: 1))
+
+    let direct: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["back", "forward", "view"]),
+        "back": finderNode("AXButton", enabled: true, parent: "toolbar"),
+        "forward": finderNode("AXButton", enabled: true, parent: "toolbar"),
+        "view": finderNode("AXPopUpButton", enabled: true, parent: "toolbar")
+    ]
+    assert(finderToolbarAction(hit: "back", nodes: direct, bundleID: finderBundleID, modifiersHeld: false) == .back)
+    assert(finderToolbarAction(hit: "forward", nodes: direct, bundleID: finderBundleID, modifiersHeld: false) == .forward)
+    assert(finderToolbarAction(hit: "view", nodes: direct, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "back", nodes: direct, bundleID: finderBundleID, modifiersHeld: true) == nil)
+    assert(finderToolbarAction(hit: "back", nodes: direct, bundleID: "com.apple.Safari", modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "missing", nodes: direct, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    var disabled = direct
+    disabled["back"]?.enabled = false
+    assert(finderToolbarAction(hit: "back", nodes: disabled, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "forward", nodes: disabled, bundleID: finderBundleID, modifiersHeld: false) == .forward)
+    var unknownEnabled = direct
+    unknownEnabled["forward"]?.enabled = nil
+    assert(finderToolbarAction(hit: "forward", nodes: unknownEnabled, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    let nested: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["side", "outer", "view"]),
+        "side": finderNode("AXButton", enabled: true, parent: "toolbar"),
+        "outer": finderNode("AXGroup", parent: "toolbar", children: ["pair"]),
+        "pair": finderNode("AXGroup", parent: "outer", children: ["back", "forward"]),
+        "back": finderNode("AXButton", enabled: true, parent: "pair", children: ["icon"]),
+        "icon": finderNode("AXImage", parent: "back"),
+        "forward": finderNode("AXButton", enabled: true, parent: "pair"),
+        "view": finderNode("AXPopUpButton", parent: "toolbar")
+    ]
+    assert(finderToolbarAction(hit: "back", nodes: nested, bundleID: finderBundleID, modifiersHeld: false) == .back)
+    assert(finderToolbarAction(hit: "icon", nodes: nested, bundleID: finderBundleID, modifiersHeld: false) == .back)
+    assert(finderToolbarAction(hit: "forward", nodes: nested, bundleID: finderBundleID, modifiersHeld: false) == .forward)
+    assert(finderToolbarAction(hit: "side", nodes: nested, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "pair", nodes: nested, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    let radios: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["views"]),
+        "views": finderNode("AXRadioGroup", parent: "toolbar", children: ["i", "l", "c", "g"]),
+        "i": finderNode("AXRadioButton", enabled: true, parent: "views"),
+        "l": finderNode("AXRadioButton", enabled: true, parent: "views"),
+        "c": finderNode("AXRadioButton", enabled: true, parent: "views"),
+        "g": finderNode("AXRadioButton", enabled: true, parent: "views")
+    ]
+    assert(finderToolbarAction(hit: "i", nodes: radios, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    let segmented: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["pair"]),
+        "pair": finderNode("AXRadioGroup", parent: "toolbar", children: ["back", "forward"]),
+        "back": finderNode("AXRadioButton", enabled: true, parent: "pair"),
+        "forward": finderNode("AXRadioButton", enabled: true, parent: "pair")
+    ]
+    assert(finderToolbarAction(hit: "back", nodes: segmented, bundleID: finderBundleID, modifiersHeld: false) == .back)
+    assert(finderToolbarAction(hit: "forward", nodes: segmented, bundleID: finderBundleID, modifiersHeld: false) == .forward)
+
+    let second: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["pair", "other"]),
+        "pair": finderNode("AXGroup", parent: "toolbar", children: ["back", "forward"]),
+        "back": finderNode("AXButton", enabled: true, parent: "pair"),
+        "forward": finderNode("AXButton", enabled: true, parent: "pair"),
+        "other": finderNode("AXGroup", parent: "toolbar", children: ["a", "b"]),
+        "a": finderNode("AXButton", enabled: true, parent: "other"),
+        "b": finderNode("AXButton", enabled: true, parent: "other")
+    ]
+    assert(finderToolbarAction(hit: "a", nodes: second, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "back", nodes: second, bundleID: finderBundleID, modifiersHeld: false) == .back)
+
+    let scrolled: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["scroll", "pair"]),
+        "scroll": finderNode("AXScrollArea", parent: "toolbar", children: ["s1", "s2"]),
+        "s1": finderNode("AXButton", enabled: true, parent: "scroll"),
+        "s2": finderNode("AXButton", enabled: true, parent: "scroll"),
+        "pair": finderNode("AXGroup", parent: "toolbar", children: ["back", "forward"]),
+        "back": finderNode("AXButton", enabled: true, parent: "pair"),
+        "forward": finderNode("AXButton", enabled: true, parent: "pair")
+    ]
+    assert(finderToolbarAction(hit: "s1", nodes: scrolled, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "forward", nodes: scrolled, bundleID: finderBundleID, modifiersHeld: false) == .forward)
+
+    let path: [String: FinderAXNode] = [
+        "window": finderNode("AXWindow", children: ["toolbar", "path"]),
+        "toolbar": finderNode("AXToolbar", parent: "window", children: ["back", "forward"]),
+        "back": finderNode("AXButton", enabled: true, parent: "toolbar"),
+        "forward": finderNode("AXButton", enabled: true, parent: "toolbar"),
+        "path": finderNode("AXGroup", parent: "window", children: ["p1", "p2"]),
+        "p1": finderNode("AXButton", enabled: true, parent: "path"),
+        "p2": finderNode("AXButton", enabled: true, parent: "path")
+    ]
+    assert(finderToolbarAction(hit: "p1", nodes: path, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    assert(finderToolbarAction(hit: "back", nodes: path, bundleID: finderBundleID, modifiersHeld: false) == .back)
+
+    var chrome = direct
+    chrome["back"]?.subrole = "AXZoomButton"
+    assert(finderToolbarAction(hit: "back", nodes: chrome, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    var crowded: [String: FinderAXNode] = ["toolbar": finderNode("AXToolbar")]
+    var ids: [String] = []
+    for n in 0..<3 {
+        let id = "b\(n)"
+        ids.append(id)
+        crowded[id] = finderNode("AXButton", enabled: true, parent: "toolbar")
+    }
+    crowded["toolbar"]?.children = ids
+    assert(finderToolbarAction(hit: "b0", nodes: crowded, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    var wide: [String: FinderAXNode] = ["toolbar": finderNode("AXToolbar")]
+    var wideIDs: [String] = []
+    for n in 0..<(finderToolbarChildCap + 1 - 2) {
+        let id = "p\(n)"
+        wideIDs.append(id)
+        wide[id] = finderNode("AXPopUpButton", parent: "toolbar")
+    }
+    wideIDs += ["back", "forward"]
+    wide["back"] = finderNode("AXButton", enabled: true, parent: "toolbar")
+    wide["forward"] = finderNode("AXButton", enabled: true, parent: "toolbar")
+    wide["toolbar"]?.children = wideIDs
+    assert(wideIDs.count == finderToolbarChildCap + 1)
+    assert(finderToolbarAction(hit: "back", nodes: wide, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    var buried: [String: FinderAXNode] = [:]
+    var parent = "toolbar"
+    buried[parent] = finderNode("AXToolbar", children: ["g1"])
+    for depth in 1...4 {
+        let id = "g\(depth)"
+        buried[parent]?.children = [id]
+        buried[id] = finderNode("AXGroup", parent: parent)
+        parent = id
+    }
+    buried[parent]?.children = ["deep", "deeper"]
+    buried["deep"] = finderNode("AXButton", enabled: true, parent: parent)
+    buried["deeper"] = finderNode("AXButton", enabled: true, parent: parent)
+    assert(finderToolbarAction(hit: "deep", nodes: buried, bundleID: finderBundleID, modifiersHeld: false) == nil)
+
+    var capped: [String: FinderAXNode] = [
+        "toolbar": finderNode("AXToolbar", children: ["branch"]),
+        "branch": finderNode("AXGroup", parent: "toolbar")
+    ]
+    var branchChildren: [String] = []
+    for index in 0..<finderToolbarChildCap {
+        let group = "g\(index)"
+        branchChildren.append(group)
+        if index < 7 {
+            let left = "a\(index)"
+            let right = "b\(index)"
+            capped[group] = finderNode("AXGroup", parent: "branch", children: [left, right])
+            capped[left] = finderNode("AXGroup", parent: group)
+            capped[right] = finderNode("AXGroup", parent: group)
+        } else if index == 7 {
+            capped[group] = finderNode("AXGroup", parent: "branch", children: ["pair"])
+            capped["pair"] = finderNode("AXGroup", parent: group, children: ["back", "forward"])
+            capped["back"] = finderNode("AXButton", enabled: true, parent: "pair")
+            capped["forward"] = finderNode("AXButton", enabled: true, parent: "pair")
+        } else {
+            capped[group] = finderNode("AXGroup", parent: "branch")
+        }
+    }
+    capped["branch"]?.children = branchChildren
+    let started = Date()
+    for _ in 0..<100 {
+        assert(finderToolbarAction(hit: "back", nodes: capped, bundleID: finderBundleID, modifiersHeld: false) == nil)
+    }
+    let elapsed = Date().timeIntervalSince(started)
+    assert(elapsed < 0.25)
+    print(String(format: "finder-nav-walk-ms: %.3f (cap %d)", elapsed * 1000, finderToolbarNodeCap))
 }
 
 private func plant(_ world: SnapshotWorld, canary: String) {
