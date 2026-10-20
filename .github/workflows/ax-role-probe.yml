@@ -91,7 +91,6 @@ jobs:
                   "children", "greenButton", "plain", "option",
                   "plainAlternate", "optionAlternate",
               }
-              }
               safe = re.compile(
                   r"^(AX[A-Za-z0-9]+|ok|trusted=false|safari-not-running|"
                   r"finder-not-running|no-safari-window|no-finder-window|"
