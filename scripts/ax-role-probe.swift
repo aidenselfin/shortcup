@@ -194,8 +194,8 @@ func axPoint(_ element: AXUIElement) -> CGPoint? {
     return point
 }
 
-func greenButton(_ window: AXUIElement) -> AXUIElement? {
-    let lights = axChildren(window, budget: NodeBudget(16)).filter {
+func greenButton(_ window: AXUIElement, childBudget: Int) -> AXUIElement? {
+    let lights = axChildren(window, budget: NodeBudget(childBudget)).filter {
         axRole($0) == "AXButton" && trafficLights.contains(axSubrole($0) ?? "")
     }
     let ranked = lights.compactMap { el -> (AXUIElement, CGFloat)? in
@@ -208,37 +208,44 @@ func greenButton(_ window: AXUIElement) -> AXUIElement? {
 
 func postOption(down: Bool) {
     let source = CGEventSource(stateID: .hidSystemState)
-    let flags: CGEventFlags = down ? .maskAlternate : []
     if let changed = CGEvent(keyboardEventSource: source, virtualKey: kVKOption, keyDown: down) {
         changed.type = .flagsChanged
-        changed.flags = flags
+        changed.flags = down ? .maskAlternate : []
         changed.post(tap: .cghidEventTap)
     }
 }
 
 func alternateDown() -> Bool {
-    CGEventSource.flagsState(.hidSystemState).contains(.maskAlternate)
+    CGEventSource.flagsState(.combinedSessionState).contains(.maskAlternate)
+}
+
+func activateFinder(_ seconds: Double) {
+    NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+        .first?.activate()
+    Thread.sleep(forTimeInterval: seconds)
+}
+
+func reading(_ button: AXUIElement) -> [String: Any] {
+    [
+        "subrole": axSubrole(button) as Any? ?? NSNull(),
+        "maskAlternate": alternateDown(),
+    ]
 }
 
 func greenButtonSubroles(_ window: AXUIElement) -> [String: Any]? {
-    guard let button = greenButton(window) else { return nil }
-    NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
-        .first?.activate()
-    Thread.sleep(forTimeInterval: 0.2)
+    activateFinder(0.2)
+    var button = greenButton(window, childBudget: 16)
+    if button == nil {
+        activateFinder(0.5)
+        button = greenButton(window, childBudget: 64)
+    }
+    guard let button else { return nil }
     postOption(down: false)
-    let plain = axSubrole(button)
-    let plainAlternate = alternateDown()
+    let plain = reading(button)
     postOption(down: true)
     defer { postOption(down: false) }
     Thread.sleep(forTimeInterval: 0.4)
-    let option = axSubrole(button)
-    let optionAlternate = alternateDown()
-    return [
-        "plain": plain as Any? ?? NSNull(),
-        "option": option as Any? ?? NSNull(),
-        "plainAlternate": plainAlternate,
-        "optionAlternate": optionAlternate,
-    ]
+    return ["plain": plain, "option": reading(button)]
 }
 
 guard CommandLine.arguments.count == 2 else {
