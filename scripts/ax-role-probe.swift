@@ -175,6 +175,56 @@ func encode(_ object: [String: Any]) throws -> Data {
     return data + Data([0x0A])
 }
 
+let trafficLights: Set<String> = [
+    "AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton",
+]
+let kVKOption: CGKeyCode = 58
+
+func axElement(_ element: AXUIElement, _ attribute: String) -> AXUIElement? {
+    let (_, value) = axCopy(element, attribute as CFString)
+    guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+    return (value as! AXUIElement)
+}
+
+func greenButton(_ window: AXUIElement) -> AXUIElement? {
+    let lights = axChildren(window, budget: NodeBudget(16)).filter {
+        axRole($0) == "AXButton" && trafficLights.contains(axSubrole($0) ?? "")
+    }
+    if lights.count >= 3 { return lights[2] }
+    return axElement(window, "AXFullScreenButton") ?? axElement(window, "AXZoomButton")
+}
+
+func postOption(down: Bool) {
+    let source = CGEventSource(stateID: .hidSystemState)
+    let flags: CGEventFlags = down ? .maskAlternate : []
+    if let changed = CGEvent(keyboardEventSource: source, virtualKey: kVKOption, keyDown: down) {
+        changed.type = .flagsChanged
+        changed.flags = flags
+        changed.post(tap: .cghidEventTap)
+    }
+    if let key = CGEvent(keyboardEventSource: source, virtualKey: kVKOption, keyDown: down) {
+        key.flags = flags
+        key.post(tap: .cghidEventTap)
+    }
+}
+
+func greenButtonSubroles(_ window: AXUIElement) -> [String: Any]? {
+    guard let button = greenButton(window) else { return nil }
+    NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+        .first?.activate()
+    Thread.sleep(forTimeInterval: 0.2)
+    postOption(down: false)
+    let plain = axSubrole(button)
+    postOption(down: true)
+    defer { postOption(down: false) }
+    Thread.sleep(forTimeInterval: 0.4)
+    let option = axSubrole(button)
+    return [
+        "plain": plain as Any? ?? NSNull(),
+        "option": option as Any? ?? NSNull(),
+    ]
+}
+
 guard CommandLine.arguments.count == 2 else {
     FileHandle.standardError.write(Data("usage: ax-role-probe OUTPUT.json\n".utf8))
     exit(2)
@@ -217,6 +267,9 @@ func probe(bundle: String, label: inout [String: Any], root pick: (AXUIElement, 
     if bundle == "com.apple.Safari", let strip = pick(window, budget) {
         label["tabStrip"] = nodeObject(dumpTree(strip, budget: budget))
     }
+    if bundle == "com.apple.finder", let green = greenButtonSubroles(window) {
+        label["greenButton"] = green
+    }
     label["truncated"] = budget.truncated
     return "ok"
 }
@@ -236,12 +289,15 @@ if reason == "ok" {
         reason = "no-tab-strip"
     } else if finder["toolbar"] == nil && finder["running"] as? Bool == true {
         reason = "no-toolbar"
+    } else if finder["greenButton"] == nil && finder["running"] as? Bool == true {
+        reason = "no-green-button"
     }
 }
 
 if safari["tabStrip"] == nil { safari["tabStrip"] = NSNull() }
 if safari["toolbar"] == nil { safari["toolbar"] = NSNull() }
 if finder["toolbar"] == nil { finder["toolbar"] = NSNull() }
+if finder["greenButton"] == nil { finder["greenButton"] = NSNull() }
 
 let report: [String: Any] = [
     "trusted": trusted,

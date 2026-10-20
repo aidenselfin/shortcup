@@ -1,4 +1,5 @@
-# Measure AXRole/AXSubrole under Safari's tab strip and Finder's toolbar
+# Measure AXRole/AXSubrole under Safari's tab strip and Finder's toolbar,
+# plus Finder's green traffic-light AXSubrole with Option up and down,
 # on a GitHub macos-26 runner. Shortcup is not built or launched. No --live.
 # JSON is role, subrole, depth, and child index only. No titles, values,
 # URLs, descriptions, window names, file names, or paths.
@@ -45,6 +46,7 @@ jobs:
           set -euo pipefail
           sdk="$(xcrun --show-sdk-path)"
           swiftc -sdk "$sdk" -framework ApplicationServices -framework AppKit \
+            -framework CoreGraphics \
             -o "${RUNNER_TEMP}/ax-role-probe" scripts/ax-role-probe.swift
 
       - name: Open Safari and Finder
@@ -86,12 +88,13 @@ jobs:
                   "trusted", "reason", "macos", "arch", "safari", "finder",
                   "running", "windowCount", "tabStrip", "toolbar", "chrome",
                   "truncated", "axError", "role", "subrole", "depth", "index",
-                  "children",
+                  "children", "greenButton", "plain", "option",
               }
               safe = re.compile(
                   r"^(AX[A-Za-z0-9]+|ok|trusted=false|safari-not-running|"
                   r"finder-not-running|no-safari-window|no-finder-window|"
-                  r"no-tab-strip|no-toolbar|arm64|x86_64|unknown|\d+(\.\d+)*)$"
+                  r"no-tab-strip|no-toolbar|no-green-button|"
+                  r"arm64|x86_64|unknown|\d+(\.\d+)*)$"
               )
 
               def walk(obj):
