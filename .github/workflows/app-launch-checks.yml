@@ -90,10 +90,11 @@ jobs:
           mkdir -p build/verify
           : > build/verify/launched.jsonl
           (cd target && zsh build.sh --dev) >/dev/null
-          # Leave the swiftc binary as-is and run it from RUNNER_TEMP like
-          # ax-role-probe. Re-signing with --identifier com.shortcup.dev
-          # gave the app a TCC identity the runner does not trust.
-          /usr/bin/ditto "target/build/Shortcup Dev.app" "${RUNNER_TEMP}/Shortcup Dev.app"
+          # Raw Mach-O in RUNNER_TEMP, same shape as ax-role-probe.
+          # A .app bundle (even unsigned) is a distinct TCC identity and
+          # does not get the runner's Accessibility grant.
+          /bin/cp "target/build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" \
+            "${RUNNER_TEMP}/ShortcupDev"
 
       - name: Launch and check
         timeout-minutes: 8
@@ -101,7 +102,8 @@ jobs:
           set -euo pipefail
           mkdir -p build/verify
           /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
-          exe="${RUNNER_TEMP}/Shortcup Dev.app/Contents/MacOS/ShortcupDev"
+          /usr/bin/defaults delete ShortcupDev >/dev/null 2>&1 || true
+          exe="${RUNNER_TEMP}/ShortcupDev"
           "$exe" &
           pid="$!"
           /bin/sleep 0.3
@@ -151,3 +153,4 @@ jobs:
           /usr/bin/killall TextEdit >/dev/null 2>&1 || true
           /usr/bin/osascript -e 'tell application "Finder" to close every window' >/dev/null 2>&1 || true
           /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
+          /usr/bin/defaults delete ShortcupDev >/dev/null 2>&1 || true

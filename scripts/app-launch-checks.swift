@@ -257,11 +257,14 @@ func quitShortcup() {
 }
 
 func mutedStored() -> [String]? {
-    CFPreferencesAppSynchronize(bundleID as CFString)
-    guard let raw = CFPreferencesCopyAppValue(defaultsKey as CFString, bundleID as CFString) else { return nil }
-    if let list = raw as? [String] { return list }
-    if let list = raw as? [NSString] { return list.map { $0 as String } }
-    return []
+    for domain in [bundleID, "ShortcupDev"] {
+        CFPreferencesAppSynchronize(domain as CFString)
+        guard let raw = CFPreferencesCopyAppValue(defaultsKey as CFString, domain as CFString) else { continue }
+        if let list = raw as? [String] { return list }
+        if let list = raw as? [NSString] { return list.map { $0 as String } }
+        return []
+    }
+    return nil
 }
 
 func shortcutOnly(_ keys: [String]) -> Bool {
