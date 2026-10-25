@@ -501,10 +501,6 @@ func miniPoint() -> CGPoint? {
 func runPR20() {
     let ids = ["pr20-a", "pr20-b", "pr20-c", "pr20-e"]
     guard waitPid(bundleID, seconds: 4) != nil else { return skipAll(ids, "no-app") }
-    if appNeedsTrust() {
-        for id in ids { emit(id, "FAIL", "not-trusted") }
-        return
-    }
     finderWindows(3)
     activate(finderID)
     guard standardWindows(finderID).count >= 3 else { return skipAll(ids, "no-window") }
@@ -514,12 +510,14 @@ func runPR20() {
 
     if let close1 = closePoint() {
         click(close1)
-        if hasKind(.close) { a = "PASS"; aWhy = "" } else { a = "FAIL"; aWhy = "" }
+        if hasKind(.close) { a = "PASS"; aWhy = "" }
+        else { a = "FAIL"; aWhy = appNeedsTrust() ? "not-trusted" : "" }
     }
 
     if let mini = miniPoint() {
         click(mini)
-        if hasKind(.mini) { c = "PASS"; cWhy = "" } else { c = "FAIL"; cWhy = "" }
+        if hasKind(.mini) { c = "PASS"; cWhy = "" }
+        else { c = "FAIL"; cWhy = appNeedsTrust() ? "not-trusted" : "" }
     }
 
     if a == "PASS", c == "PASS", let close2 = closePoint() {
@@ -552,10 +550,6 @@ func runPR20AfterRelaunch() {
         emit("pr20-d", "SKIP", "no-app")
         return
     }
-    if appNeedsTrust() {
-        emit("pr20-d", "FAIL", "not-trusted")
-        return
-    }
     guard let muted = mutedKind() else {
         emit("pr20-d", "SKIP", "no-mute")
         return
@@ -572,16 +566,13 @@ func runPR20AfterRelaunch() {
     click(mutedPoint)
     let hidden = !hasKind(muted)
     click(otherPoint)
-    emit("pr20-d", hidden && hasKind(other) ? "PASS" : "FAIL")
+    if hidden && hasKind(other) { emit("pr20-d", "PASS") }
+    else { emit("pr20-d", "FAIL", appNeedsTrust() ? "not-trusted" : "") }
 }
 
 func runPR21() {
     let ids = ["pr21-a", "pr21-b", "pr21-c"]
     guard waitPid(bundleID, seconds: 4) != nil else { return skipAll(ids, "no-app") }
-    if appNeedsTrust() {
-        for id in ids { emit(id, "FAIL", "not-trusted") }
-        return
-    }
 
     var a = "SKIP", b = "SKIP", c = "SKIP"
     var aWhy = "no-button", bWhy = "no-positive-control", cWhy = "no-positive-control"
@@ -604,11 +595,11 @@ func runPR21() {
         let backOK = hasKind(.back)
         activate(finderID)
         if let again = finderNavPair(), again.forwardOn, clickButton(again.forward) {
-            a = (backOK && hasKind(.forward)) ? "PASS" : "FAIL"
-            aWhy = ""
+            if backOK && hasKind(.forward) { a = "PASS"; aWhy = "" }
+            else { a = "FAIL"; aWhy = appNeedsTrust() ? "not-trusted" : "" }
         } else {
             a = "FAIL"
-            aWhy = ""
+            aWhy = appNeedsTrust() ? "not-trusted" : ""
         }
     }
 
