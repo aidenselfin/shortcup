@@ -105,11 +105,7 @@ jobs:
           mkdir -p build/verify
           : > build/verify/launched.jsonl
           (cd target && zsh build.sh --dev) >/dev/null
-          # Raw Mach-O in RUNNER_TEMP, same shape as ax-role-probe.
-          # A .app bundle (even unsigned) is a distinct TCC identity and
-          # does not get the runner's Accessibility grant.
-          /bin/cp "target/build/Shortcup Dev.app/Contents/MacOS/ShortcupDev" \
-            "${RUNNER_TEMP}/ShortcupDev"
+          /usr/bin/ditto "target/build/Shortcup Dev.app" "${RUNNER_TEMP}/Shortcup Dev.app"
 
       - name: Launch and check
         timeout-minutes: 8
@@ -118,7 +114,7 @@ jobs:
           mkdir -p build/verify
           /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
           /usr/bin/defaults delete ShortcupDev >/dev/null 2>&1 || true
-          exe="${RUNNER_TEMP}/ShortcupDev"
+          exe="${RUNNER_TEMP}/Shortcup Dev.app/Contents/MacOS/ShortcupDev"
           SHORTCUP_TEST_HOOK=1 "$exe" &
           pid="$!"
           /bin/sleep 0.3

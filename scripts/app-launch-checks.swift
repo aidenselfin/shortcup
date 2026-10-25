@@ -120,6 +120,15 @@ func axSetOrigin(_ element: AXUIElement, x: Double, y: Double) {
     AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value)
 }
 
+func hookReady() -> Bool {
+    let deadline = Date().addingTimeInterval(4)
+    while Date() < deadline {
+        if FileManager.default.fileExists(atPath: "/tmp/shortcup-test-hook") { return true }
+        pause(0.1)
+    }
+    return false
+}
+
 func inject(_ name: String, _ point: CGPoint, _ flags: UInt64) {
     let line = "\(name) \(point.x) \(point.y) \(flags)\n"
     guard let handle = FileHandle(forWritingAtPath: "/tmp/shortcup-test-hook") else { return }
@@ -510,6 +519,10 @@ func miniPoint() -> CGPoint? {
 func runPR20() {
     let ids = ["pr20-a", "pr20-b", "pr20-c", "pr20-e"]
     guard waitPid(bundleID, seconds: 4) != nil else { return skipAll(ids, "no-app") }
+    if !hookReady() {
+        for id in ids { emit(id, "FAIL", "no-hook") }
+        return
+    }
     finderWindows(3)
     activate(finderID)
     guard standardWindows(finderID).count >= 3 else { return skipAll(ids, "no-window") }
@@ -559,6 +572,10 @@ func runPR20AfterRelaunch() {
         emit("pr20-d", "SKIP", "no-app")
         return
     }
+    if !hookReady() {
+        emit("pr20-d", "FAIL", "no-hook")
+        return
+    }
     guard let muted = mutedKind() else {
         emit("pr20-d", "SKIP", "no-mute")
         return
@@ -582,6 +599,10 @@ func runPR20AfterRelaunch() {
 func runPR21() {
     let ids = ["pr21-a", "pr21-b", "pr21-c"]
     guard waitPid(bundleID, seconds: 4) != nil else { return skipAll(ids, "no-app") }
+    if !hookReady() {
+        for id in ids { emit(id, "FAIL", "no-hook") }
+        return
+    }
 
     var a = "SKIP", b = "SKIP", c = "SKIP"
     var aWhy = "no-button", bWhy = "no-positive-control", cWhy = "no-positive-control"
