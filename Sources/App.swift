@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import Darwin
 
 func axValue(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
@@ -132,6 +133,72 @@ final class LiveAXWorld: AXReading {
     }
 }
 
+#if SHORTCUP_DEV || SHORTCUP_CHECKS
+struct TestHookClick: Equatable {
+    var type: String
+    var x: Double
+    var y: Double
+    var flags: UInt64
+}
+
+func testHookClick(_ line: String) -> TestHookClick? {
+    let parts = line.split(separator: " ")
+    guard parts.count == 4, let x = Double(parts[1]), let y = Double(parts[2]), let flags = UInt64(parts[3]),
+          x.isFinite, y.isFinite else { return nil }
+    switch parts[0] {
+    case "down", "up", "drag":
+        return TestHookClick(type: String(parts[0]), x: x, y: y, flags: flags)
+    default:
+        return nil
+    }
+}
+
+func testHookDrain(_ buffer: inout String) -> [TestHookClick] {
+    var out: [TestHookClick] = []
+    while let nl = buffer.firstIndex(of: "\n") {
+        let line = String(buffer[..<nl]).trimmingCharacters(in: .whitespacesAndNewlines)
+        buffer.removeSubrange(buffer.startIndex..<buffer.index(after: nl))
+        if let click = testHookClick(line) { out.append(click) }
+    }
+    return out
+}
+#endif
+
+#if SHORTCUP_CHECKS
+func checkTestHook() {
+    assert(testHookClick("down 12.5 -3 0") == TestHookClick(type: "down", x: 12.5, y: -3, flags: 0))
+    assert(testHookClick("up 1 2 1048576") == TestHookClick(type: "up", x: 1, y: 2, flags: 1048576))
+    assert(testHookClick("down  9  8  1") == TestHookClick(type: "down", x: 9, y: 8, flags: 1))
+    assert(testHookClick("down 1 2") == nil)
+    assert(testHookClick("nope 1 2 0") == nil)
+    assert(testHookClick("down nan 1 0") == nil)
+    var pending = "down 1 2 0\nup 3 4 8\ndra"
+    assert(testHookDrain(&pending).map(\.type) == ["down", "up"])
+    assert(pending == "dra")
+    assert(testHookDrain(&pending).isEmpty)
+    pending += "g 5 6 0\n"
+    assert(testHookDrain(&pending) == [TestHookClick(type: "drag", x: 5, y: 6, flags: 0)])
+    assert(pending.isEmpty)
+}
+#endif
+
+#if SHORTCUP_DEV
+func testHookEnabled() -> Bool {
+    ProcessInfo.processInfo.environment["SHORTCUP_TEST_HOOK"] == "1"
+        && !CommandLine.arguments.contains("--selftest")
+}
+
+// Per-user temp directory. A symlink or another uid is ignored.
+func testHookPath() -> String? {
+    let path = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("shortcup-test-hook").path
+    var info = stat()
+    let exists = path.withCString { lstat($0, &info) } == 0
+    if exists, (info.st_mode & S_IFMT) == S_IFLNK || info.st_uid != getuid() { return nil }
+    return path
+}
+#endif
+
 final class ClickListener {
     var onHint: ((Hint) -> Void)?
     var onStatus: ((String) -> Void)?
@@ -152,8 +219,17 @@ final class ClickListener {
     var allowedRect: CGRect?
     var allowedBundleID: String?
     var allowedPID: pid_t?
+    // ponytail: one file in the user temp directory, 20ms poll. A socket if two dev apps must inject at once.
+    private var hookTimer: Timer?
+    private var hookUsed = 0
+    private var hookPartial = ""
     #endif
-    var running: Bool { tap != nil }
+    var running: Bool {
+        #if SHORTCUP_DEV
+        if hookTimer != nil { return true }
+        #endif
+        return tap != nil
+    }
 
     init() {
         session = WindowMenuSession(world: LiveAXWorld())
@@ -166,6 +242,9 @@ final class ClickListener {
         queue.async { self.paused = value; self.candidate = nil; self.dock.cancelClick(); self.dockDown = nil }
     }
     func start() {
+        #if SHORTCUP_DEV
+        if testHookEnabled() { startTestHook(); return }
+        #endif
         guard tap == nil, AXIsProcessTrusted() else { return }
         let mask = (CGEventMask(1) << CGEventType.leftMouseDown.rawValue) | (CGEventMask(1) << CGEventType.leftMouseUp.rawValue) | (CGEventMask(1) << CGEventType.leftMouseDragged.rawValue)
         let callback: CGEventTapCallBack = { _, type, event, context in
@@ -196,6 +275,10 @@ final class ClickListener {
         if let tap { CGEvent.tapEnable(tap: tap, enable: false); CFMachPortInvalidate(tap) }
         if let runSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runSource, .commonModes) }
         tap = nil; runSource = nil
+        #if SHORTCUP_DEV
+        hookTimer?.invalidate()
+        hookTimer = nil
+        #endif
         queue.async { self.candidate = nil; self.dock.cancelClick(); self.dockDown = nil }
     }
 
@@ -213,6 +296,44 @@ final class ClickListener {
     func waitUntilIdle() { queue.sync {} }
 
     #if SHORTCUP_DEV
+    // Dev build only, and only when SHORTCUP_TEST_HOOK=1. Release compiles this out.
+    // Lines already in the file when the hook arms are ignored. New lines go through process().
+    private func startTestHook() {
+        guard hookTimer == nil, let path = testHookPath() else { return }
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+        hookPartial = ""
+        hookUsed = FileManager.default.contents(atPath: path)?.count ?? 0
+        let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
+            self?.queue.async { self?.pollTestHook() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        hookTimer = timer
+    }
+
+    private func pollTestHook() {
+        guard let path = testHookPath(), let data = FileManager.default.contents(atPath: path) else { return }
+        if data.count < hookUsed {
+            hookUsed = 0
+            hookPartial = ""
+        }
+        guard data.count > hookUsed else { return }
+        let chunk = data.subdata(in: hookUsed..<data.count)
+        hookUsed = data.count
+        hookPartial += String(data: chunk, encoding: .utf8) ?? ""
+        for click in testHookDrain(&hookPartial) {
+            let type: CGEventType
+            switch click.type {
+            case "down": type = .leftMouseDown
+            case "up": type = .leftMouseUp
+            default: type = .leftMouseDragged
+            }
+            process(type: type, point: CGPoint(x: click.x, y: click.y), flags: CGEventFlags(rawValue: click.flags), now: Date())
+        }
+    }
+
     func inspectHint(at point: CGPoint) -> Hint? {
         var hint: Hint?
         queue.sync { hint = session.inspect(at: point) }
@@ -597,7 +718,11 @@ final class AppController: NSObject, NSApplicationDelegate {
     }
 
     private func checkPermission() {
+        #if SHORTCUP_DEV
+        let now = AXIsProcessTrusted() || testHookEnabled()
+        #else
         let now = AXIsProcessTrusted()
+        #endif
         if now != trusted || panel.contentView == nil {
             let gained = now && !trusted
             trusted = now
