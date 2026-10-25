@@ -1,0 +1,167 @@
+# Launch Shortcup Dev on a standard macos-26 runner and drive the
+# PR #20 / PR #21 manual lists with synthetic clicks. No --live.
+# Each target is PR #24 head merged with the pinned PR #20 / #21 SHA
+# inside the job. Clicks go through SHORTCUP_TEST_HOOK and HID.
+# Logs are PASS/FAIL/SKIP lines only. No screenshots, video, or artifacts.
+
+name: app-launch-checks
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/app-launch-checks.yml"
+      - "scripts/app-launch-checks.swift"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-launch-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  launch:
+    name: macos-26 pr${{ matrix.pr }}
+    runs-on: macos-26
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - pr: "20"
+            sha: "30d18f88aac296476ab711ef2051fb4646da4ede"
+          - pr: "21"
+            sha: "966c3e36a7a190f68de4b101a4dd2c3b6956d3b6"
+    steps:
+      - name: Checkout checks
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        timeout-minutes: 2
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch target
+        timeout-minutes: 2
+        env:
+          TARGET_SHA: ${{ matrix.sha }}
+          TARGET_PR: ${{ matrix.pr }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/pull/${TARGET_PR}/head"
+          got="$(git rev-parse --verify FETCH_HEAD)"
+          if [[ "$got" != "$TARGET_SHA" ]]; then
+            echo "pr${TARGET_PR}-infra FAIL"
+            exit 1
+          fi
+          git fetch --no-tags origin "refs/pull/24/head"
+          hook="$(git rev-parse --verify FETCH_HEAD)"
+          git worktree add --detach target "$TARGET_SHA"
+          git -C target config user.email "ci@github.invalid"
+          git -C target config user.name "ci"
+          if ! git -C target merge --no-edit "$hook"; then
+            files="$(git -C target diff --name-only --diff-filter=U | tr '\n' ' ')"
+            if [[ "$TARGET_PR" == "20" ]]; then
+              ids="pr20-a pr20-b pr20-c pr20-d pr20-e"
+            else
+              ids="pr21-a pr21-b pr21-c"
+            fi
+            for id in $ids; do
+              echo "$id FAIL conflict ${files}"
+            done
+            exit 1
+          fi
+
+      - name: Accessibility trust probe
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --show-sdk-path)"
+          swiftc -sdk "$sdk" -framework ApplicationServices \
+            -o "${RUNNER_TEMP}/ax-trust-probe" scripts/ax-trust-probe.swift
+          "${RUNNER_TEMP}/ax-trust-probe" > "${RUNNER_TEMP}/ax-trust.txt"
+          trusted="$(awk -F= '/^trusted=/{print $2; exit}' "${RUNNER_TEMP}/ax-trust.txt" | tr -d '[:space:]')"
+          echo "ax_trusted=${trusted}" >> "$GITHUB_ENV"
+          echo "ax_trusted=${trusted}"
+
+      - name: Compile driver
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --show-sdk-path)"
+          swiftc -sdk "$sdk" -framework ApplicationServices \
+            -o "${RUNNER_TEMP}/app-launch-checks" scripts/app-launch-checks.swift
+
+      - name: Build dev app
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          : > build/verify/launched.jsonl
+          (cd target && zsh build.sh --dev) >/dev/null
+          /usr/bin/ditto "target/build/Shortcup Dev.app" "${RUNNER_TEMP}/Shortcup Dev.app"
+
+      - name: Launch and check
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
+          /usr/bin/defaults delete ShortcupDev >/dev/null 2>&1 || true
+          exe="${RUNNER_TEMP}/Shortcup Dev.app/Contents/MacOS/ShortcupDev"
+          SHORTCUP_TEST_HOOK=1 "$exe" &
+          pid="$!"
+          /bin/sleep 0.3
+          /usr/bin/python3 scripts/stop-launched.py record build/verify/launched.jsonl "$pid"
+          /bin/sleep 2
+          set +e
+          "${RUNNER_TEMP}/app-launch-checks" "pr${{ matrix.pr }}" \
+            > build/verify/app-launch-checks.txt
+          set -e
+          if [[ "${{ matrix.pr }}" == "20" ]]; then
+            /usr/bin/killall ShortcupDev >/dev/null 2>&1 || true
+            /bin/sleep 1
+            SHORTCUP_TEST_HOOK=1 "$exe" &
+            pid="$!"
+            /bin/sleep 0.3
+            /usr/bin/python3 scripts/stop-launched.py record build/verify/launched.jsonl "$pid"
+            /bin/sleep 2
+            set +e
+            "${RUNNER_TEMP}/app-launch-checks" pr20 --after-relaunch \
+              >> build/verify/app-launch-checks.txt
+            set -e
+          fi
+          cat build/verify/app-launch-checks.txt
+          if ! grep -E -q '^pr(20|21)-[a-e] (PASS|FAIL|SKIP)' build/verify/app-launch-checks.txt; then
+            echo "pr${{ matrix.pr }}-infra FAIL"
+            exit 1
+          fi
+          {
+            echo "### pr${{ matrix.pr }}"
+            echo
+            echo "| check | result |"
+            echo "| --- | --- |"
+            awk '/^pr(20|21)-[a-e] / { printf("| %s | %s |\n", $1, substr($0, index($0,$2))) }' \
+              build/verify/app-launch-checks.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop launched processes
+        if: always()
+        timeout-minutes: 1
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify
+          record=build/verify/launched.jsonl
+          [[ -f "$record" ]] || : > "$record"
+          /usr/bin/python3 scripts/stop-launched.py stop "$record" || true
+          /usr/bin/killall ShortcupDev >/dev/null 2>&1 || true
+          /usr/bin/killall TextEdit >/dev/null 2>&1 || true
+          /usr/bin/osascript -e 'tell application "Finder" to close every window' >/dev/null 2>&1 || true
+          /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
+          /usr/bin/defaults delete ShortcupDev >/dev/null 2>&1 || true
