@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import Darwin
 
 func axValue(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
@@ -182,11 +183,19 @@ func checkTestHook() {
 #endif
 
 #if SHORTCUP_DEV
-private let testHookPath = "/tmp/shortcup-test-hook"
-
 func testHookEnabled() -> Bool {
     ProcessInfo.processInfo.environment["SHORTCUP_TEST_HOOK"] == "1"
         && !CommandLine.arguments.contains("--selftest")
+}
+
+// Per-user temp directory. A symlink or another uid is ignored.
+func testHookPath() -> String? {
+    let path = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+        .appendingPathComponent("shortcup-test-hook").path
+    var info = stat()
+    let exists = path.withCString { lstat($0, &info) } == 0
+    if exists, (info.st_mode & S_IFMT) == S_IFLNK || info.st_uid != getuid() { return nil }
+    return path
 }
 #endif
 
@@ -210,12 +219,17 @@ final class ClickListener {
     var allowedRect: CGRect?
     var allowedBundleID: String?
     var allowedPID: pid_t?
-    // ponytail: one shared file, 20ms poll. A socket if two dev apps must inject at once.
+    // ponytail: one file in the user temp directory, 20ms poll. A socket if two dev apps must inject at once.
     private var hookTimer: Timer?
     private var hookUsed = 0
     private var hookPartial = ""
     #endif
-    var running: Bool { tap != nil }
+    var running: Bool {
+        #if SHORTCUP_DEV
+        if hookTimer != nil { return true }
+        #endif
+        return tap != nil
+    }
 
     init() {
         session = WindowMenuSession(world: LiveAXWorld())
@@ -285,13 +299,13 @@ final class ClickListener {
     // Dev build only, and only when SHORTCUP_TEST_HOOK=1. Release compiles this out.
     // Lines already in the file when the hook arms are ignored. New lines go through process().
     private func startTestHook() {
-        guard hookTimer == nil else { return }
-        if !FileManager.default.fileExists(atPath: testHookPath) {
-            FileManager.default.createFile(atPath: testHookPath, contents: nil)
+        guard hookTimer == nil, let path = testHookPath() else { return }
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
         }
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: testHookPath)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
         hookPartial = ""
-        hookUsed = FileManager.default.contents(atPath: testHookPath)?.count ?? 0
+        hookUsed = FileManager.default.contents(atPath: path)?.count ?? 0
         let timer = Timer(timeInterval: 0.02, repeats: true) { [weak self] _ in
             self?.queue.async { self?.pollTestHook() }
         }
@@ -300,7 +314,12 @@ final class ClickListener {
     }
 
     private func pollTestHook() {
-        guard let data = FileManager.default.contents(atPath: testHookPath), data.count > hookUsed else { return }
+        guard let path = testHookPath(), let data = FileManager.default.contents(atPath: path) else { return }
+        if data.count < hookUsed {
+            hookUsed = 0
+            hookPartial = ""
+        }
+        guard data.count > hookUsed else { return }
         let chunk = data.subdata(in: hookUsed..<data.count)
         hookUsed = data.count
         hookPartial += String(data: chunk, encoding: .utf8) ?? ""
