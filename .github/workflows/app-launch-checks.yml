@@ -119,6 +119,7 @@ jobs:
         timeout-minutes: 1
         run: |
           set -euo pipefail
+          mkdir -p build/verify
           record=build/verify/launched.jsonl
           [[ -f "$record" ]] || : > "$record"
           /usr/bin/python3 scripts/stop-launched.py stop "$record" || true

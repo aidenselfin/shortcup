@@ -165,7 +165,7 @@ func panelTexts() -> [String] {
         }
         for child in axChildren(element) { walk(child, depth: depth + 1) }
     }
-    for window in axWindows(bundleID) { walk(window, 0) }
+    for window in axWindows(bundleID) { walk(window, depth: 0) }
     return texts
 }
 
@@ -262,8 +262,8 @@ func visibleMenus() -> [AXUIElement] {
         if axRole(element) == "AXMenu" { menus.append(element); return }
         for child in axChildren(element) { walk(child, depth: depth + 1) }
     }
-    if let app = axApp(bundleID) { walk(app, 0) }
-    for item in extrasItems() { walk(item, 0) }
+    if let app = axApp(bundleID) { walk(app, depth: 0) }
+    for item in extrasItems() { walk(item, depth: 0) }
     return menus
 }
 
