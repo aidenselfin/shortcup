@@ -1,9 +1,8 @@
 # Launch Shortcup Dev on a standard macos-26 runner and drive the
 # PR #20 / PR #21 manual lists with synthetic clicks. No --live.
+# Each target is PR #24 head merged with the pinned PR #20 / #21 SHA
+# inside the job. Clicks go through SHORTCUP_TEST_HOOK and HID.
 # Logs are PASS/FAIL/SKIP lines only. No screenshots, video, or artifacts.
-# Driver matches ax-role-probe / ax-trust-probe: unsigned swiftc binary,
-# exec'd directly from bash (no pipe, no open, no sudo). The app is the
-# unsigned --dev binary, also started from bash, so it keeps runner AX.
 
 name: app-launch-checks
 
@@ -46,7 +45,7 @@ jobs:
         timeout-minutes: 2
         with:
           persist-credentials: false
-          fetch-depth: 1
+          fetch-depth: 0
 
       - name: Fetch target
         timeout-minutes: 2
@@ -55,13 +54,29 @@ jobs:
           TARGET_PR: ${{ matrix.pr }}
         run: |
           set -euo pipefail
-          git fetch --no-tags --depth=1 origin "refs/pull/${TARGET_PR}/head"
+          git fetch --no-tags origin "refs/pull/${TARGET_PR}/head"
           got="$(git rev-parse --verify FETCH_HEAD)"
           if [[ "$got" != "$TARGET_SHA" ]]; then
             echo "pr${TARGET_PR}-infra FAIL"
             exit 1
           fi
+          git fetch --no-tags origin "refs/pull/24/head"
+          hook="$(git rev-parse --verify FETCH_HEAD)"
           git worktree add --detach target "$TARGET_SHA"
+          git -C target config user.email "ci@github.invalid"
+          git -C target config user.name "ci"
+          if ! git -C target merge --no-edit "$hook"; then
+            files="$(git -C target diff --name-only --diff-filter=U | tr '\n' ' ')"
+            if [[ "$TARGET_PR" == "20" ]]; then
+              ids="pr20-a pr20-b pr20-c pr20-d pr20-e"
+            else
+              ids="pr21-a pr21-b pr21-c"
+            fi
+            for id in $ids; do
+              echo "$id FAIL conflict ${files}"
+            done
+            exit 1
+          fi
 
       - name: Accessibility trust probe
         timeout-minutes: 2
@@ -104,7 +119,7 @@ jobs:
           /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
           /usr/bin/defaults delete ShortcupDev >/dev/null 2>&1 || true
           exe="${RUNNER_TEMP}/ShortcupDev"
-          "$exe" &
+          SHORTCUP_TEST_HOOK=1 "$exe" &
           pid="$!"
           /bin/sleep 0.3
           /usr/bin/python3 scripts/stop-launched.py record build/verify/launched.jsonl "$pid"
@@ -116,7 +131,7 @@ jobs:
           if [[ "${{ matrix.pr }}" == "20" ]]; then
             /usr/bin/killall ShortcupDev >/dev/null 2>&1 || true
             /bin/sleep 1
-            "$exe" &
+            SHORTCUP_TEST_HOOK=1 "$exe" &
             pid="$!"
             /bin/sleep 0.3
             /usr/bin/python3 scripts/stop-launched.py record build/verify/launched.jsonl "$pid"

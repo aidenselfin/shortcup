@@ -120,11 +120,20 @@ func axSetOrigin(_ element: AXUIElement, x: Double, y: Double) {
     AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value)
 }
 
+func inject(_ name: String, _ point: CGPoint, _ flags: UInt64) {
+    let line = "\(name) \(point.x) \(point.y) \(flags)\n"
+    guard let handle = FileHandle(forWritingAtPath: "/tmp/shortcup-test-hook") else { return }
+    defer { try? handle.close() }
+    _ = try? handle.seekToEnd()
+    try? handle.write(contentsOf: Data(line.utf8))
+}
+
 func click(_ point: CGPoint, settle: Double = 0.9) {
-    let types: [CGEventType] = [.leftMouseDown, .leftMouseUp]
-    for type in types {
+    let halves: [(CGEventType, String)] = [(.leftMouseDown, "down"), (.leftMouseUp, "up")]
+    for (type, name) in halves {
         if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) {
             event.post(tap: .cghidEventTap)
+            inject(name, point, event.flags.rawValue)
         }
         if type == .leftMouseDown { pause(0.06) }
     }
