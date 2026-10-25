@@ -1,4 +1,3 @@
-import AppKit
 import ApplicationServices
 import Foundation
 
@@ -28,8 +27,26 @@ func skipAll(_ ids: [String], _ reason: String) {
     for id in ids { emit(id, "SKIP", reason) }
 }
 
+func pgrep(_ name: String) -> pid_t? {
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+    task.arguments = ["-x", name]
+    let pipe = Pipe()
+    task.standardOutput = pipe
+    task.standardError = FileHandle.nullDevice
+    do { try task.run() } catch { return nil }
+    task.waitUntilExit()
+    let text = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    return text.split(whereSeparator: \.isNewline).compactMap { pid_t(String($0)) }.first
+}
+
 func running(_ id: String) -> pid_t? {
-    NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.processIdentifier
+    switch id {
+    case bundleID: return pgrep("ShortcupDev")
+    case finderID: return pgrep("Finder")
+    case textEditID: return pgrep("TextEdit")
+    default: return nil
+    }
 }
 
 func axCopy(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
@@ -134,7 +151,7 @@ func mutedKind() -> Kind? {
 }
 
 func activate(_ id: String) {
-    NSRunningApplication.runningApplications(withBundleIdentifier: id).first?.activate()
+    osa("tell application id \"\(id)\" to activate")
     pause(1.6)
 }
 
@@ -226,18 +243,17 @@ func openTextEdit() {
 }
 
 func quitShortcup() {
-    NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).forEach { $0.terminate() }
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/bin/killall")
+    task.arguments = ["ShortcupDev"]
+    task.standardOutput = FileHandle.nullDevice
+    task.standardError = FileHandle.nullDevice
+    try? task.run()
+    task.waitUntilExit()
     for _ in 0..<40 {
         if running(bundleID) == nil { return }
         pause(0.1)
     }
-}
-
-func launchExe(_ path: String) -> Bool {
-    let task = Process()
-    task.executableURL = URL(fileURLWithPath: path)
-    do { try task.run() } catch { return false }
-    return waitPid(bundleID, seconds: 6) != nil
 }
 
 func mutedStored() -> [String]? {
@@ -479,16 +495,19 @@ func miniPoint() -> CGPoint? {
     return nil
 }
 
-func runPR20(exe: String?) {
-    let ids = ["pr20-a", "pr20-b", "pr20-c", "pr20-d", "pr20-e"]
+func runPR20() {
+    let ids = ["pr20-a", "pr20-b", "pr20-c", "pr20-e"]
     guard waitPid(bundleID, seconds: 4) != nil else { return skipAll(ids, "no-app") }
-    if appNeedsTrust() { return skipAll(ids, "not-trusted") }
+    if appNeedsTrust() {
+        for id in ids { emit(id, "FAIL", "not-trusted") }
+        return
+    }
     finderWindows(3)
     activate(finderID)
     guard standardWindows(finderID).count >= 3 else { return skipAll(ids, "no-window") }
 
-    var a = "SKIP", b = "SKIP", c = "SKIP", d = "SKIP", e = "SKIP"
-    var aWhy = "no-button", bWhy = "no-button", cWhy = "no-button", dWhy = "no-mute", eWhy = "no-mute"
+    var a = "SKIP", b = "SKIP", c = "SKIP", e = "SKIP"
+    var aWhy = "no-button", bWhy = "no-button", cWhy = "no-button", eWhy = "no-mute"
 
     if let close1 = closePoint() {
         click(close1)
@@ -514,33 +533,7 @@ func runPR20(exe: String?) {
         if muteKind(wantMute) {
             e = inspectMuted() == "ok" ? "PASS" : "FAIL"
             eWhy = ""
-            if let exe, !exe.isEmpty {
-                quitShortcup()
-                if launchExe(exe) {
-                    pause(1.0)
-                    finderWindows(2)
-                    activate(finderID)
-                    let muted = mutedKind() ?? wantMute
-                    let other: Kind = muted == .close ? .mini : .close
-                    let mutedPoint = muted == .close ? closePoint() : miniPoint()
-                    let otherPoint = other == .close ? closePoint() : miniPoint()
-                    if let mutedPoint, let otherPoint {
-                        click(mutedPoint)
-                        let hidden = !hasKind(muted)
-                        click(otherPoint)
-                        d = hidden && hasKind(other) ? "PASS" : "FAIL"
-                        dWhy = ""
-                    } else {
-                        dWhy = "no-button"
-                    }
-                } else {
-                    dWhy = "no-relaunch"
-                }
-            } else {
-                dWhy = "no-exe"
-            }
         } else {
-            dWhy = "no-menu"
             eWhy = "no-menu"
         }
     }
@@ -548,14 +541,44 @@ func runPR20(exe: String?) {
     emit("pr20-a", a, aWhy)
     emit("pr20-b", b, bWhy)
     emit("pr20-c", c, cWhy)
-    emit("pr20-d", d, dWhy)
     emit("pr20-e", e, eWhy)
+}
+
+func runPR20AfterRelaunch() {
+    if running(bundleID) == nil {
+        emit("pr20-d", "SKIP", "no-app")
+        return
+    }
+    if appNeedsTrust() {
+        emit("pr20-d", "FAIL", "not-trusted")
+        return
+    }
+    guard let muted = mutedKind() else {
+        emit("pr20-d", "SKIP", "no-mute")
+        return
+    }
+    finderWindows(2)
+    activate(finderID)
+    let other: Kind = muted == .close ? .mini : .close
+    let mutedPoint = muted == .close ? closePoint() : miniPoint()
+    let otherPoint = other == .close ? closePoint() : miniPoint()
+    guard let mutedPoint, let otherPoint else {
+        emit("pr20-d", "SKIP", "no-button")
+        return
+    }
+    click(mutedPoint)
+    let hidden = !hasKind(muted)
+    click(otherPoint)
+    emit("pr20-d", hidden && hasKind(other) ? "PASS" : "FAIL")
 }
 
 func runPR21() {
     let ids = ["pr21-a", "pr21-b", "pr21-c"]
     guard waitPid(bundleID, seconds: 4) != nil else { return skipAll(ids, "no-app") }
-    if appNeedsTrust() { return skipAll(ids, "not-trusted") }
+    if appNeedsTrust() {
+        for id in ids { emit(id, "FAIL", "not-trusted") }
+        return
+    }
 
     var a = "SKIP", b = "SKIP", c = "SKIP"
     var aWhy = "no-button", bWhy = "no-positive-control", cWhy = "no-positive-control"
@@ -627,18 +650,19 @@ func runPR21() {
 
 let args = Array(CommandLine.arguments.dropFirst())
 let suite = args.first ?? ""
-var exe = ""
-if let index = args.firstIndex(of: "--exe"), args.count > index + 1 { exe = args[index + 1] }
+let afterRelaunch = args.contains("--after-relaunch")
 
 guard AXIsProcessTrusted() else {
-    if suite == "pr20" { skipAll(["pr20-a", "pr20-b", "pr20-c", "pr20-d", "pr20-e"], "not-trusted") }
+    if afterRelaunch { emit("pr20-d", "SKIP", "not-trusted") }
+    else if suite == "pr20" { skipAll(["pr20-a", "pr20-b", "pr20-c", "pr20-e"], "not-trusted") }
     else if suite == "pr21" { skipAll(["pr21-a", "pr21-b", "pr21-c"], "not-trusted") }
     else { emit("pr-unknown", "SKIP", "not-trusted") }
     exit(0)
 }
 
 switch suite {
-case "pr20": runPR20(exe: exe)
+case "pr20":
+    if afterRelaunch { runPR20AfterRelaunch() } else { runPR20() }
 case "pr21": runPR21()
 default:
     emit("pr-unknown", "FAIL")

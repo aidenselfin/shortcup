@@ -1,6 +1,9 @@
 # Launch Shortcup Dev on a standard macos-26 runner and drive the
 # PR #20 / PR #21 manual lists with synthetic clicks. No --live.
 # Logs are PASS/FAIL/SKIP lines only. No screenshots, video, or artifacts.
+# Driver matches ax-role-probe / ax-trust-probe: unsigned swiftc binary,
+# exec'd directly from bash (no pipe, no open, no sudo). The app is the
+# unsigned --dev binary, also started from bash, so it keeps runner AX.
 
 name: app-launch-checks
 
@@ -60,12 +63,24 @@ jobs:
           fi
           git worktree add --detach target "$TARGET_SHA"
 
+      - name: Accessibility trust probe
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          sdk="$(xcrun --show-sdk-path)"
+          swiftc -sdk "$sdk" -framework ApplicationServices \
+            -o "${RUNNER_TEMP}/ax-trust-probe" scripts/ax-trust-probe.swift
+          "${RUNNER_TEMP}/ax-trust-probe" > "${RUNNER_TEMP}/ax-trust.txt"
+          trusted="$(awk -F= '/^trusted=/{print $2; exit}' "${RUNNER_TEMP}/ax-trust.txt" | tr -d '[:space:]')"
+          echo "ax_trusted=${trusted}" >> "$GITHUB_ENV"
+          echo "ax_trusted=${trusted}"
+
       - name: Compile driver
         timeout-minutes: 2
         run: |
           set -euo pipefail
           sdk="$(xcrun --show-sdk-path)"
-          swiftc -sdk "$sdk" -framework ApplicationServices -framework AppKit \
+          swiftc -sdk "$sdk" -framework ApplicationServices \
             -o "${RUNNER_TEMP}/app-launch-checks" scripts/app-launch-checks.swift
 
       - name: Build dev app
@@ -75,32 +90,41 @@ jobs:
           mkdir -p build/verify
           : > build/verify/launched.jsonl
           (cd target && zsh build.sh --dev) >/dev/null
-          codesign --force -s - --identifier com.shortcup.dev "target/build/Shortcup Dev.app"
-          sig="$(codesign -dv "target/build/Shortcup Dev.app" 2>&1 || true)"
-          if echo "$sig" | grep -q 'Authority='; then
-            echo "pr${{ matrix.pr }}-infra FAIL"
-            exit 1
-          fi
-          if ! echo "$sig" | grep -q 'Signature=adhoc'; then
-            echo "pr${{ matrix.pr }}-infra FAIL"
-            exit 1
-          fi
+          # Leave the swiftc binary as-is and run it from RUNNER_TEMP like
+          # ax-role-probe. Re-signing with --identifier com.shortcup.dev
+          # gave the app a TCC identity the runner does not trust.
+          /usr/bin/ditto "target/build/Shortcup Dev.app" "${RUNNER_TEMP}/Shortcup Dev.app"
 
       - name: Launch and check
         timeout-minutes: 8
         run: |
           set -euo pipefail
+          mkdir -p build/verify
           /usr/bin/defaults delete com.shortcup.dev >/dev/null 2>&1 || true
-          exe="target/build/Shortcup Dev.app/Contents/MacOS/ShortcupDev"
+          exe="${RUNNER_TEMP}/Shortcup Dev.app/Contents/MacOS/ShortcupDev"
           "$exe" &
           pid="$!"
           /bin/sleep 0.3
           /usr/bin/python3 scripts/stop-launched.py record build/verify/launched.jsonl "$pid"
           /bin/sleep 2
           set +e
-          "${RUNNER_TEMP}/app-launch-checks" "pr${{ matrix.pr }}" --exe "$exe" \
-            | tee build/verify/app-launch-checks.txt
+          "${RUNNER_TEMP}/app-launch-checks" "pr${{ matrix.pr }}" \
+            > build/verify/app-launch-checks.txt
           set -e
+          if [[ "${{ matrix.pr }}" == "20" ]]; then
+            /usr/bin/killall ShortcupDev >/dev/null 2>&1 || true
+            /bin/sleep 1
+            "$exe" &
+            pid="$!"
+            /bin/sleep 0.3
+            /usr/bin/python3 scripts/stop-launched.py record build/verify/launched.jsonl "$pid"
+            /bin/sleep 2
+            set +e
+            "${RUNNER_TEMP}/app-launch-checks" pr20 --after-relaunch \
+              >> build/verify/app-launch-checks.txt
+            set -e
+          fi
+          cat build/verify/app-launch-checks.txt
           if ! grep -E -q '^pr(20|21)-[a-e] (PASS|FAIL|SKIP)' build/verify/app-launch-checks.txt; then
             echo "pr${{ matrix.pr }}-infra FAIL"
             exit 1
