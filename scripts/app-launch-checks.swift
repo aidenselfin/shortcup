@@ -103,7 +103,7 @@ func axSetOrigin(_ element: AXUIElement, x: Double, y: Double) {
     AXUIElementSetAttributeValue(element, kAXPositionAttribute as CFString, value)
 }
 
-func click(_ point: CGPoint) {
+func click(_ point: CGPoint, settle: Double = 0.9) {
     let types: [CGEventType] = [.leftMouseDown, .leftMouseUp]
     for type in types {
         if let event = CGEvent(mouseEventSource: nil, mouseType: type, mouseCursorPosition: point, mouseButton: .left) {
@@ -111,7 +111,26 @@ func click(_ point: CGPoint) {
         }
         if type == .leftMouseDown { pause(0.06) }
     }
-    pause(0.9)
+    pause(settle)
+}
+
+func tokens(for kind: Kind) -> [String] {
+    switch kind {
+    case .close: return closeTokens
+    case .mini: return miniTokens
+    case .back: return backTokens
+    case .forward: return forwardTokens
+    }
+}
+
+func mutedKind() -> Kind? {
+    for key in mutedStored() ?? [] {
+        if matches(key, closeTokens) { return .close }
+        if matches(key, miniTokens) { return .mini }
+        if matches(key, backTokens) { return .back }
+        if matches(key, forwardTokens) { return .forward }
+    }
+    return nil
 }
 
 func activate(_ id: String) {
@@ -254,51 +273,78 @@ func extrasItems() -> [AXUIElement] {
     return []
 }
 
-func visibleMenus() -> [AXUIElement] {
-    guard let pid = running(bundleID) else { return [] }
+func collectMenus(_ root: AXUIElement) -> [AXUIElement] {
     var menus: [AXUIElement] = []
     func walk(_ element: AXUIElement, depth: Int) {
-        guard depth < 8, axPid(element) == pid else { return }
-        if axRole(element) == "AXMenu" { menus.append(element); return }
+        guard depth < 10 else { return }
+        if axRole(element) == "AXMenu" { menus.append(element) }
         for child in axChildren(element) { walk(child, depth: depth + 1) }
     }
-    if let app = axApp(bundleID) { walk(app, depth: 0) }
-    for item in extrasItems() { walk(item, depth: 0) }
+    walk(root, depth: 0)
     return menus
 }
 
-func muteShownHint() -> Bool {
-    let items = extrasItems()
-    let target = items.first
-    if let target, let frame = axFrame(target), !frame.isEmpty {
-        click(CGPoint(x: frame.midX, y: frame.midY))
-    } else if let target {
-        _ = press(target)
-        pause(0.4)
-    } else {
-        return muteByIndex()
-    }
-    pause(0.3)
-    var menus = visibleMenus()
-    var parentItems = menus.flatMap(axChildren).filter { axRole($0) == "AXMenuItem" && !axChildren($0).isEmpty }
-    if parentItems.isEmpty {
-        _ = muteByIndex()
-        menus = visibleMenus()
-        parentItems = menus.flatMap(axChildren).filter { axRole($0) == "AXMenuItem" && !axChildren($0).isEmpty }
-    }
-    guard let submenuOwner = parentItems.first else { return false }
-    _ = press(submenuOwner)
-    pause(0.3)
-    let kids = axChildren(submenuOwner) + visibleMenus().flatMap(axChildren)
-    let enabled = kids.filter { axRole($0) == "AXMenuItem" && axBool($0, kAXEnabledAttribute as String) != false && axChildren($0).isEmpty }
-    guard let first = enabled.first else { return false }
-    _ = press(first)
-    if let frame = axFrame(first), !frame.isEmpty { click(CGPoint(x: frame.midX, y: frame.midY)) }
-    pause(0.4)
-    return mutedStored()?.isEmpty == false
+func allMenus() -> [AXUIElement] {
+    var menus: [AXUIElement] = []
+    if let app = axApp(bundleID) { menus.append(contentsOf: collectMenus(app)) }
+    for item in extrasItems() { menus.append(contentsOf: collectMenus(item)) }
+    return menus
 }
 
-func muteByIndex() -> Bool {
+func menuItems(_ menu: AXUIElement) -> [AXUIElement] {
+    axChildren(menu).filter { axRole($0) == "AXMenuItem" }
+}
+
+func nestedMenu(_ item: AXUIElement) -> AXUIElement? {
+    axChildren(item).first { axRole($0) == "AXMenu" }
+}
+
+func openExtras() -> Bool {
+    guard let item = extrasItems().first else { return false }
+    if let frame = axFrame(item), !frame.isEmpty {
+        click(CGPoint(x: frame.midX, y: frame.midY), settle: 0.3)
+        return true
+    }
+    return press(item)
+}
+
+func hintSubmenuItems() -> [AXUIElement] {
+    for menu in allMenus() {
+        for item in menuItems(menu) {
+            if let nested = nestedMenu(item) { return menuItems(nested) }
+        }
+    }
+    return []
+}
+
+func pressMatchingHint(_ want: Kind) -> Bool {
+    var owner: AXUIElement?
+    for menu in allMenus() {
+        owner = menuItems(menu).first { nestedMenu($0) != nil }
+        if owner != nil { break }
+    }
+    guard let owner else { return false }
+    _ = press(owner)
+    pause(0.3)
+    let items = (nestedMenu(owner).map(menuItems) ?? []) + hintSubmenuItems()
+    let wantTokens = tokens(for: want)
+    let target = items.first { matches(axString($0, kAXTitleAttribute as String), wantTokens) }
+        ?? items.first { axChildren($0).isEmpty && axBool($0, kAXEnabledAttribute as String) != false }
+    guard let target else { return false }
+    _ = press(target)
+    pause(0.4)
+    return mutedKind() != nil
+}
+
+func muteKind(_ want: Kind) -> Bool {
+    if openExtras() {
+        pause(0.2)
+        if pressMatchingHint(want) { return true }
+    }
+    return muteBySubmenu() && mutedKind() != nil
+}
+
+func muteBySubmenu() -> Bool {
     let script = """
     tell application "System Events"
       set procs to (every process whose bundle identifier is "com.shortcup.dev")
@@ -309,14 +355,21 @@ func muteByIndex() -> Bool {
         click menu bar item 1 of menu bar barIndex
         delay 0.25
         set topMenu to menu 1 of menu bar item 1 of menu bar barIndex
-        if (count of menu items of topMenu) < 3 then return "no"
-        click menu item 3 of topMenu
-        delay 0.25
-        set hintMenu to menu 1 of menu item 3 of topMenu
-        if (count of menu items of hintMenu) < 1 then return "no"
-        if enabled of menu item 1 of hintMenu is false then return "no"
-        click menu item 1 of hintMenu
-        return "ok"
+        repeat with itm in menu items of topMenu
+          if (exists menu 1 of itm) then
+            click itm
+            delay 0.25
+            set hintMenu to menu 1 of itm
+            repeat with hintItem in menu items of hintMenu
+              if enabled of hintItem is true then
+                click hintItem
+                return "ok"
+              end if
+            end repeat
+            return "no"
+          end if
+        end repeat
+        return "no"
       end tell
     end tell
     """
@@ -332,37 +385,53 @@ func muteByIndex() -> Bool {
     return text.trimmingCharacters(in: .whitespacesAndNewlines) == "ok"
 }
 
-func finderNavPair() -> (back: AXUIElement, forward: AXUIElement, backOn: Bool, forwardOn: Bool)? {
-    func isButton(_ role: String) -> Bool { role == "AXButton" || role == "AXRadioButton" }
-    func pairRole(_ role: String) -> Bool { role == "AXToolbar" || role == "AXGroup" || role == "AXRadioGroup" }
+func finderToolbars() -> [AXUIElement] {
+    var bars: [AXUIElement] = []
     for window in standardWindows(finderID) {
         var queue: [(AXUIElement, Int)] = [(window, 0)]
         var i = 0
         while i < queue.count && i < 40 {
             let (node, depth) = queue[i]
             i += 1
-            let role = axRole(node)
-            if role == "AXToolbar" || pairRole(role) {
-                let kids = axChildren(node)
-                let buttons = kids.filter { isButton(axRole($0)) }
-                if buttons.count == 2 {
-                    return (
-                        buttons[0], buttons[1],
-                        axBool(buttons[0], kAXEnabledAttribute as String) == true,
-                        axBool(buttons[1], kAXEnabledAttribute as String) == true
-                    )
-                }
-                if role == "AXToolbar" || depth < 3 {
-                    for child in kids where pairRole(axRole(child)) && axRole(child) != "AXScrollArea" {
-                        queue.append((child, depth + 1))
-                    }
-                }
-            } else if depth < 4 {
+            if axRole(node) == "AXToolbar" { bars.append(node); continue }
+            if depth < 4 {
                 for child in axChildren(node) { queue.append((child, depth + 1)) }
             }
         }
     }
-    return nil
+    return bars
+}
+
+func finderNavPair() -> (back: AXUIElement, forward: AXUIElement, backOn: Bool, forwardOn: Bool)? {
+    func isButton(_ role: String) -> Bool { role == "AXButton" || role == "AXRadioButton" }
+    func pairRole(_ role: String) -> Bool { role == "AXToolbar" || role == "AXGroup" || role == "AXRadioGroup" }
+    var pairs: [(AXUIElement, AXUIElement, CGFloat)] = []
+    for toolbar in finderToolbars() {
+        var queue: [(AXUIElement, Int)] = [(toolbar, 0)]
+        var i = 0
+        while i < queue.count && i < 32 {
+            let (node, depth) = queue[i]
+            i += 1
+            let role = axRole(node)
+            if pairRole(role) {
+                let buttons = axChildren(node).filter { isButton(axRole($0)) && !["AXCloseButton", "AXMinimizeButton", "AXFullScreenButton", "AXZoomButton"].contains(axSubrole($0)) }
+                if buttons.count == 2, let frame = axFrame(buttons[0]) {
+                    pairs.append((buttons[0], buttons[1], frame.minX))
+                }
+                if depth < 3 {
+                    for child in axChildren(node) where pairRole(axRole(child)) {
+                        queue.append((child, depth + 1))
+                    }
+                }
+            }
+        }
+    }
+    guard let best = pairs.min(by: { $0.2 < $1.2 }) else { return nil }
+    return (
+        best.0, best.1,
+        axBool(best.0, kAXEnabledAttribute as String) == true,
+        axBool(best.1, kAXEnabledAttribute as String) == true
+    )
 }
 
 func clickButton(_ element: AXUIElement) -> Bool {
@@ -441,15 +510,29 @@ func runPR20(exe: String?) {
     }
 
     if a == "PASS" || c == "PASS" {
-        if muteShownHint() {
+        let wantMute: Kind = a == "PASS" ? .close : .mini
+        if muteKind(wantMute) {
             e = inspectMuted() == "ok" ? "PASS" : "FAIL"
             eWhy = ""
             if let exe, !exe.isEmpty {
                 quitShortcup()
                 if launchExe(exe) {
                     pause(1.0)
-                    d = inspectMuted() == "ok" ? "PASS" : "FAIL"
-                    dWhy = ""
+                    finderWindows(2)
+                    activate(finderID)
+                    let muted = mutedKind() ?? wantMute
+                    let other: Kind = muted == .close ? .mini : .close
+                    let mutedPoint = muted == .close ? closePoint() : miniPoint()
+                    let otherPoint = other == .close ? closePoint() : miniPoint()
+                    if let mutedPoint, let otherPoint {
+                        click(mutedPoint)
+                        let hidden = !hasKind(muted)
+                        click(otherPoint)
+                        d = hidden && hasKind(other) ? "PASS" : "FAIL"
+                        dWhy = ""
+                    } else {
+                        dWhy = "no-button"
+                    }
                 } else {
                     dWhy = "no-relaunch"
                 }
@@ -475,26 +558,9 @@ func runPR21() {
     if appNeedsTrust() { return skipAll(ids, "not-trusted") }
 
     var a = "SKIP", b = "SKIP", c = "SKIP"
-    var aWhy = "no-button", bWhy = "no-button", cWhy = "no-window"
-
-    openTextEdit()
-    activate(textEditID)
-    if clickTextBody() {
-        c = (!hasKind(.back) && !hasKind(.forward)) ? "PASS" : "FAIL"
-        cWhy = ""
-    }
+    var aWhy = "no-button", bWhy = "no-positive-control", cWhy = "no-positive-control"
 
     finderWindows(1)
-    activate(finderID)
-    if let pair = finderNavPair() {
-        if pair.backOn && pair.forwardOn {
-            bWhy = "nav-enabled"
-        } else if clickButton(pair.backOn ? pair.forward : pair.back) {
-            b = (!hasKind(.back) && !hasKind(.forward)) ? "PASS" : "FAIL"
-            bWhy = ""
-        }
-    }
-
     osa("""
     tell application "Finder"
       activate
@@ -515,9 +581,43 @@ func runPR21() {
             a = (backOK && hasKind(.forward)) ? "PASS" : "FAIL"
             aWhy = ""
         } else {
-            a = backOK ? "FAIL" : "SKIP"
-            aWhy = backOK ? "" : "no-button"
+            a = "FAIL"
+            aWhy = ""
         }
+    }
+
+    guard a == "PASS" else {
+        emit("pr21-a", a, aWhy)
+        emit("pr21-b", "SKIP", "no-positive-control")
+        emit("pr21-c", "SKIP", "no-positive-control")
+        return
+    }
+
+    finderWindows(1)
+    activate(finderID)
+    if let pair = finderNavPair() {
+        if pair.backOn && pair.forwardOn {
+            bWhy = "nav-enabled"
+        } else {
+            let before = panelKinds()
+            if clickButton(pair.backOn ? pair.forward : pair.back) {
+                b = panelKinds() == before ? "PASS" : "FAIL"
+                bWhy = ""
+            } else {
+                bWhy = "no-button"
+            }
+        }
+    } else {
+        bWhy = "no-button"
+    }
+
+    openTextEdit()
+    let before = panelKinds()
+    if clickTextBody() {
+        c = panelKinds() == before ? "PASS" : "FAIL"
+        cWhy = ""
+    } else {
+        cWhy = "no-window"
     }
 
     emit("pr21-a", a, aWhy)
